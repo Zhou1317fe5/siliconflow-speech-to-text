@@ -9,6 +9,12 @@ document.addEventListener('DOMContentLoaded', function() {
     const recalibrateBtn = document.getElementById('recalibrateBtn');
     const summarizeBtn = document.getElementById('summarizeBtn');
     const generateNotesBtn = document.getElementById('generateNotesBtn');
+    
+    // --- 进度条元素 ---
+    const progressBarContainer = document.getElementById('progressBarContainer');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const progressPercent = document.getElementById('progressPercent');
 
     // --- 状态变量 ---
     let currentRawTranscription = null;
@@ -17,6 +23,7 @@ document.addEventListener('DOMContentLoaded', function() {
     let isShowingSummary = false;
     let notesText = null;
     let isShowingNotes = false;
+    let currentEventSource = null; // 用于管理SSE连接
 
     // --- UI 更新函数 ---
     function updateStatus(message, type) {
@@ -42,6 +49,38 @@ document.addEventListener('DOMContentLoaded', function() {
         copyBtn.disabled = disabled || transcriptionResult.textContent.trim() === '';
         summarizeBtn.disabled = disabled || !hasContent;
         generateNotesBtn.disabled = disabled || !hasContent;
+    }
+
+    // --- 进度条控制函数 ---
+    function showProgressBar() {
+        progressBarContainer.classList.remove('hidden');
+        progressBar.style.width = '0%';
+        progressText.textContent = '准备中...';
+        progressPercent.textContent = '0%';
+        progressBar.classList.add('pulsing');
+    }
+    
+    function updateProgress(progress, message) {
+        progressBar.style.width = progress + '%';
+        progressText.textContent = message;
+        progressPercent.textContent = progress + '%';
+        
+        // 在关键阶段添加脉冲效果
+        if (progress >= 95) {
+            progressBar.classList.remove('pulsing');
+        }
+    }
+    
+    function hideProgressBar() {
+        progressBarContainer.classList.add('hidden');
+        progressBar.classList.remove('pulsing');
+    }
+    
+    function closeEventSource() {
+        if (currentEventSource) {
+            currentEventSource.close();
+            currentEventSource = null;
+        }
     }
 
     // --- 状态重置函数 ---
@@ -71,8 +110,12 @@ document.addEventListener('DOMContentLoaded', function() {
             currentRawTranscription = null;
             currentCalibratedText = null;
             resetSummaryState(); // 重置摘要状态，这也会清空文本框
+            
+            // 3. 关闭之前的EventSource连接并隐藏进度条
+            closeEventSource();
+            hideProgressBar();
     
-            // 3. 启用提交按钮，禁用其他操作按钮
+            // 4. 启用提交按钮，禁用其他操作按钮
             submitBtn.disabled = false;
             recalibrateBtn.disabled = true;
             copyBtn.disabled = true;
@@ -85,6 +128,8 @@ document.addEventListener('DOMContentLoaded', function() {
             // 如果用户取消了文件选择
             fileNameDisplay.textContent = '未选择文件';
             submitBtn.disabled = true;
+            closeEventSource();
+            hideProgressBar();
         }
     });
     
@@ -101,7 +146,7 @@ document.addEventListener('DOMContentLoaded', function() {
         resetSummaryState();
     }
 
-    submitBtn.addEventListener('click', async function(event) {
+    submitBtn.addEventListener('click', function(event) {
         event.preventDefault();
         const file = audioFileInput.files[0];
         if (!file) {
@@ -109,9 +154,11 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        const formData = new FormData();
-        formData.append('audio_file', file);
+        // 关闭之前的连接
+        closeEventSource();
         
+        // 显示进度条
+        showProgressBar();
         updateStatus('正在上传和转录音频...', 'info');
         setActionButtonsDisabledState(true);
         
@@ -119,25 +166,107 @@ document.addEventListener('DOMContentLoaded', function() {
         const originalText = submitBtnSpan.textContent;
         submitBtnSpan.textContent = '处理中...';
 
-        try {
-            const response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+        // 使用fetch上传文件并启动SSE流
+        const formData = new FormData();
+        formData.append('audio_file', file);
+        
+        fetch('/api/transcribe-stream', {
+            method: 'POST',
+            body: formData
+        }).then(response => {
             if (!response.ok) {
-                const errorData = await response.json().catch(() => ({ error: `请求失败 (状态 ${response.status})` }));
-                throw new Error(errorData.error);
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
-            const data = await response.json();
-            if (data.status === "success") {
-                handleSuccess(data, "转录");
-            } else {
-                throw new Error(data.error || '转录失败或返回结果格式不正确。');
+            
+            // 使用fetch的流式读取处理SSE响应
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = ''; // 用于处理不完整的数据块
+            
+            function readStream() {
+                return reader.read().then(({ done, value }) => {
+                    if (done) {
+                        console.log('Stream completed');
+                        return;
+                    }
+                    
+                    // 将新数据添加到缓冲区
+                    buffer += decoder.decode(value, { stream: true });
+                    
+                    // 按行分割数据
+                    const lines = buffer.split('\n');
+                    
+                    // 保留最后一行（可能不完整）
+                    buffer = lines.pop() || '';
+                    
+                    // 处理完整的行
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const jsonData = line.substring(6).trim();
+                                if (jsonData) {
+                                    const eventData = JSON.parse(jsonData);
+                                    handleProgressEvent(eventData);
+                                }
+                            } catch (e) {
+                                console.error('Failed to parse SSE data:', e, 'Line:', line);
+                            }
+                        }
+                    }
+                    
+                    return readStream();
+                });
             }
-        } catch (error) {
+            
+            return readStream();
+            
+        }).catch(error => {
             console.error('转录错误:', error);
             updateStatus(`发生错误: ${error.message}`, 'error');
             currentCalibratedText = null;
-        } finally {
+            hideProgressBar();
+        }).finally(() => {
             setActionButtonsDisabledState(false);
             submitBtnSpan.textContent = originalText;
+        });
+        
+        // SSE事件处理函数
+        function handleProgressEvent(eventData) {
+            const { stage, message, progress, data } = eventData;
+            
+            // 更新进度条
+            updateProgress(progress, message);
+            
+            // 根据不同阶段更新状态消息
+            switch (stage) {
+                case 'STARTING':
+                case 'S2T_START':
+                case 'S2T_COMPLETE':
+                case 'OPTIMIZATION_START':
+                case 'OPTIMIZING_CHUNK':
+                case 'OPTIMIZATION_COMPLETE':
+                    updateStatus(message, 'info');
+                    break;
+                    
+                case 'DONE':
+                    // 处理完成，隐藏进度条并显示结果
+                    hideProgressBar();
+                    if (data) {
+                        handleSuccess(data, "转录");
+                    }
+                    setActionButtonsDisabledState(false);
+                    submitBtnSpan.textContent = originalText;
+                    break;
+                    
+                case 'ERROR':
+                    // 处理错误
+                    hideProgressBar();
+                    updateStatus(`发生错误: ${message}`, 'error');
+                    currentCalibratedText = null;
+                    setActionButtonsDisabledState(false);
+                    submitBtnSpan.textContent = originalText;
+                    break;
+            }
         }
     });
 
@@ -325,5 +454,19 @@ document.addEventListener('DOMContentLoaded', function() {
                 copyBtn.classList.remove('copied-error');
             }, 3000);
         });
+    });
+    
+    // --- 页面卸载时的清理 ---
+    window.addEventListener('beforeunload', function() {
+        closeEventSource();
+    });
+    
+    // --- 页面隐藏时的清理（移动端兼容） ---
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden && currentEventSource) {
+            // 页面被隐藏时，可以选择关闭连接以节省资源
+            // 这里我们保持连接，但可以根据需要调整
+            console.log('Page hidden, EventSource still active');
+        }
     });
 });

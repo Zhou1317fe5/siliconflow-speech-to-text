@@ -40,6 +40,19 @@
             </div>
         </form>
 
+        <!-- 进度条容器 -->
+        <div id="progressBarContainer" class="progress-bar-container hidden px-4 sm:px-6 md:px-10 pb-4">
+            <div class="progress-bar-wrapper">
+                <div class="progress-bar-track">
+                    <div id="progressBar" class="progress-bar-fill"></div>
+                </div>
+                <div class="progress-info">
+                    <span id="progressText" class="progress-text">准备中...</span>
+                    <span id="progressPercent" class="progress-percent">0%</span>
+                </div>
+            </div>
+        </div>
+
         <div class="results-area flex flex-col flex-grow px-4 sm:px-6 md:px-10 pb-6 md:pb-8 overflow-hidden">
             <div class="results-content-wrapper bg-white/90 p-5 sm:p-6 rounded-xl shadow-custom-sm h-full flex flex-col flex-grow">
                 <div class="flex justify-between items-center mb-4 flex-shrink-0">

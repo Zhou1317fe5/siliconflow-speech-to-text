@@ -314,6 +314,74 @@ def _perform_text_optimization(raw_text_to_optimize):
         print(f"所有 {total_chunks} 个块均已成功校准并合并。")
         return full_optimized_text, "校准成功！", True
 
+def _perform_text_optimization_with_progress(raw_text_to_optimize, progress_callback=None):
+    """
+    带进度回调的文本优化函数
+    progress_callback: 可选的进度回调函数，接收 (stage, message, progress) 参数
+    """
+    opt_configured_properly = OPT_API_KEY and OPT_API_URL and OPT_API_URL.startswith(('http://', 'https://')) and CALIBRATION_MODEL
+    if not opt_configured_properly:
+        opt_configured_for_check = OPT_API_KEY or (OPT_API_URL and OPT_API_URL != 'https://api.openai.com/v1/chat/completions') or CALIBRATION_MODEL
+        skip_reason_parts = []
+        if not OPT_API_KEY: skip_reason_parts.append("缺少API Key")
+        if not OPT_API_URL or not OPT_API_URL.startswith(('http://', 'https://')): skip_reason_parts.append("API URL无效")
+        if not CALIBRATION_MODEL: skip_reason_parts.append("缺少校准模型名称")
+        if not opt_configured_for_check:
+             opt_status_message = "校准已跳过 (服务未配置)"
+        else:
+            skip_reason = ", ".join(skip_reason_parts)
+            opt_status_message = f"校准已跳过 (服务配置不完整: {skip_reason})"
+        print(f"OPT API 配置不完整，跳过文本优化。原因: {opt_status_message}")
+        return raw_text_to_optimize, opt_status_message, False
+
+    if len(raw_text_to_optimize) <= CHUNK_PROCESSING_THRESHOLD:
+        print("文本较短，直接进行单次校准...")
+        result = _optimize_chunk_with_retry({'text': raw_text_to_optimize, 'index': 1, 'total': 1})
+        if result['status'] == 'success':
+            return result['content'], "校准成功！", True
+        else:
+            return raw_text_to_optimize, f"校准失败 ({result['message']})", False
+            
+    chunks = _split_text_intelligently(raw_text_to_optimize)
+    total_chunks = len(chunks)
+    print(f"文本过长({len(raw_text_to_optimize)}字)，启动分块并发校准 (共 {total_chunks} 块)...")
+    
+    # 创建任务列表
+    tasks = [{'text': chunk, 'context': (_get_last_sentence(chunks[i-1]) if i > 0 else None), 'index': i + 1, 'total': total_chunks} for i, chunk in enumerate(chunks)]
+    
+    # 使用 ThreadPoolExecutor 但添加进度回调
+    processed_results = []
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        # 提交所有任务
+        future_to_index = {executor.submit(_optimize_chunk_with_retry, task): i for i, task in enumerate(tasks)}
+        
+        # 收集结果并更新进度
+        completed_count = 0
+        for future in future_to_index:
+            result = future.result()
+            index = future_to_index[future]
+            processed_results.append((index, result))
+            completed_count += 1
+            
+            # 计算进度 (45% 到 95% 之间) - 调用进度回调
+            progress = 45 + int((completed_count / total_chunks) * 50)
+            if progress_callback:
+                progress_callback("OPTIMIZING_CHUNK", f"正在校准文本块 ({completed_count}/{total_chunks})...", progress)
+    
+    # 按原始顺序排序结果
+    processed_results.sort(key=lambda x: x[0])
+    processed_results = [result for _, result in processed_results]
+    
+    failed_chunks = [res for res in processed_results if res['status'] == 'error']
+    if failed_chunks:
+        first_error_message = failed_chunks[0]['message']
+        print(f"校准过程中有 {len(failed_chunks)}/{total_chunks} 个块处理失败，回退到原始文本。首个失败原因: {first_error_message}")
+        return raw_text_to_optimize, f"校准失败 ({first_error_message})", False
+    else:
+        full_optimized_text = "".join([res['content'] for res in processed_results])
+        print(f"所有 {total_chunks} 个块均已成功校准并合并。")
+        return full_optimized_text, "校准成功！", True
+
 # 要点提取逻辑函数
 def _summarize_chunk_with_retry(text_chunk):
     '''
@@ -518,11 +586,57 @@ def openai_audio_transcriptions():
     if not model_requested or model_requested not in [MODEL_CALIBRATE, MODEL_SUMMARIZE]:
         return jsonify({"error": f"Model '{model_requested}' is not supported. Please use '{MODEL_CALIBRATE}' or '{MODEL_SUMMARIZE}'."}), 400
 
+    # 关键修复：在生成器函数外部处理文件读取
+    print(f"API Call: 开始安全文件处理 - 文件名: {audio_file.filename}")
+    print(f"[DEBUG] 文件对象类型: {type(audio_file)}, 流类型: {type(audio_file.stream)}")
+    
+    try:
+        # 彻底的文件流处理策略
+        print(f"[DEBUG] 文件对象类型: {type(audio_file)}, 流类型: {type(audio_file.stream)}")
+        print(f"[DEBUG] 流状态检查 - closed: {getattr(audio_file.stream, 'closed', 'N/A')}")
+        
+        # 多种方法尝试读取文件内容
+        audio_content = None
+        try:
+            # 方法1：尝试直接从FileStorage读取
+            print("[DEBUG] 尝试方法1: 直接从FileStorage读取...")
+            if hasattr(audio_file.stream, 'seek'):
+                audio_file.stream.seek(0)
+            audio_content = audio_file.read()
+            print(f"[DEBUG] 方法1成功: 读取了 {len(audio_content)} 字节")
+        except Exception as method1_error:
+            print(f"[DEBUG] 方法1失败: {type(method1_error).__name__} - {method1_error}")
+            
+            # 方法2：尝试直接从底层流读取
+            print("[DEBUG] 尝试方法2: 直接从底层流读取...")
+            try:
+                if hasattr(audio_file.stream, 'seek'):
+                    audio_file.stream.seek(0)
+                audio_content = audio_file.stream.read()
+                print(f"[DEBUG] 方法2成功: 读取了 {len(audio_content)} 字节")
+            except Exception as method2_error:
+                print(f"[DEBUG] 方法2失败: {type(method2_error).__name__} - {method2_error}")
+                raise Exception(f"所有文件读取方法都失败了。最后错误: {method2_error}")
+        
+        if not audio_content:
+            return jsonify({"error": "上传的文件为空"}), 400
+        
+        # 使用BytesIO创建独立的文件流
+        from io import BytesIO
+        audio_stream = BytesIO(audio_content)
+        print(f"API Call: 文件内容读取成功，大小: {len(audio_content)} 字节")
+        
+    except Exception as file_error:
+        print(f"API Call: 文件处理失败: {type(file_error).__name__} - {file_error}")
+        print(f"[DEBUG] FileStorage属性: {[attr for attr in dir(audio_file) if not attr.startswith('_')]}")
+        return jsonify({"error": f"文件处理失败: {type(file_error).__name__} - {file_error}"}), 500
+
     def generate_response():
         try:
             print(f"API Call: Received request for model '{model_requested}'. Starting S2T...")
-            yield " " 
-            s2t_files = {'file': (audio_file.filename, audio_file.stream, audio_file.mimetype)}
+            yield " "
+            
+            s2t_files = {'file': (audio_file.filename, audio_stream, audio_file.mimetype)}
             s2t_payload = {'model': S2T_MODEL}
             s2t_headers = {'Authorization': f'Bearer {S2T_API_KEY}'}
             s2t_response = requests.post(S2T_API_URL, files=s2t_files, data=s2t_payload, headers=s2t_headers, timeout=300)
@@ -566,6 +680,185 @@ def openai_audio_transcriptions():
 # =============================================================
 # ---  Web UI 数据接口路由API ---
 # =============================================================
+
+# SSE 进度更新辅助函数
+def send_progress_event(stage, message, progress, data=None):
+    """发送 SSE 进度事件"""
+    event_data = {
+        "stage": stage,
+        "message": message,
+        "progress": progress
+    }
+    if data:
+        event_data["data"] = data
+    
+    return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+
+@app.route('/api/transcribe-stream', methods=['POST'])
+def transcribe_and_optimize_audio_stream():
+    """SSE 流式转录端点"""
+    print("\n--- [Transcribe Stream] 请求开始 ---")
+    audio_file = request.files.get('audio_file')
+    if not audio_file:
+        print("[Transcribe Stream] 错误: 请求中缺少音频文件。")
+        def error_generator():
+            yield send_progress_event("ERROR", "缺少上传的音频文件", 100)
+        return Response(stream_with_context(error_generator()),
+                       mimetype='text/event-stream',
+                       headers={'Cache-Control': 'no-cache'})
+    
+    # 关键修复：彻底的文件流处理策略
+    print(f"[Transcribe Stream] 开始安全文件处理 - 文件名: {audio_file.filename}")
+    print(f"[DEBUG] 文件对象类型: {type(audio_file)}, 流类型: {type(audio_file.stream)}")
+    print(f"[DEBUG] 流状态检查 - closed: {getattr(audio_file.stream, 'closed', 'N/A')}")
+    
+    try:
+        # 方法1：尝试直接从FileStorage读取
+        print("[DEBUG] 尝试方法1: 直接从FileStorage读取...")
+        try:
+            # 确保流在正确位置
+            if hasattr(audio_file.stream, 'seek'):
+                audio_file.stream.seek(0)
+            audio_content = audio_file.read()
+            print(f"[DEBUG] 方法1成功: 读取了 {len(audio_content)} 字节")
+        except Exception as method1_error:
+            print(f"[DEBUG] 方法1失败: {type(method1_error).__name__} - {method1_error}")
+            
+            # 方法2：尝试直接从底层流读取
+            print("[DEBUG] 尝试方法2: 直接从底层流读取...")
+            try:
+                if hasattr(audio_file.stream, 'seek'):
+                    audio_file.stream.seek(0)
+                audio_content = audio_file.stream.read()
+                print(f"[DEBUG] 方法2成功: 读取了 {len(audio_content)} 字节")
+            except Exception as method2_error:
+                print(f"[DEBUG] 方法2失败: {type(method2_error).__name__} - {method2_error}")
+                
+                # 方法3：尝试获取原始数据
+                print("[DEBUG] 尝试方法3: 获取原始数据...")
+                try:
+                    # 检查是否有缓存的数据
+                    if hasattr(audio_file, '_file') and audio_file._file:
+                        audio_content = audio_file._file.read()
+                        print(f"[DEBUG] 方法3成功: 从_file读取了 {len(audio_content)} 字节")
+                    else:
+                        raise Exception("无法访问文件数据")
+                except Exception as method3_error:
+                    print(f"[DEBUG] 方法3失败: {type(method3_error).__name__} - {method3_error}")
+                    raise Exception(f"所有文件读取方法都失败了。最后错误: {method3_error}")
+        
+        if not audio_content:
+            print("[Transcribe Stream] 错误: 上传的文件为空")
+            def error_generator():
+                yield send_progress_event("ERROR", "上传的文件为空", 100)
+            return Response(stream_with_context(error_generator()),
+                           mimetype='text/event-stream',
+                           headers={'Cache-Control': 'no-cache'})
+        
+        # 使用BytesIO创建独立的文件流
+        from io import BytesIO
+        audio_stream = BytesIO(audio_content)
+        print(f"[DEBUG] BytesIO对象创建成功，大小: {len(audio_content)} 字节")
+        
+    except Exception as file_error:
+        print(f"[Transcribe Stream] 文件处理失败: {type(file_error).__name__} - {file_error}")
+        print(f"[DEBUG] 错误发生时流状态: closed={getattr(audio_file.stream, 'closed', 'N/A')}")
+        print(f"[DEBUG] FileStorage属性: {[attr for attr in dir(audio_file) if not attr.startswith('_')]}")
+        def error_generator():
+            yield send_progress_event("ERROR", f"文件处理失败: {type(file_error).__name__} - {file_error}", 100)
+        return Response(stream_with_context(error_generator()),
+                       mimetype='text/event-stream',
+                       headers={'Cache-Control': 'no-cache'})
+    
+    def generate_progress():
+        try:
+            # 阶段1: 任务启动
+            yield send_progress_event("STARTING", "任务启动中...", 5)
+            
+            # 阶段2: S2T API 调用开始
+            yield send_progress_event("S2T_START", "正在进行语音识别...", 10)
+            
+            # 构建请求文件对象（使用已经准备好的BytesIO流）
+            s2t_files = {'file': (audio_file.filename, audio_stream, audio_file.mimetype)}
+            print(f"[Transcribe Stream] 安全文件流创建完成")
+            s2t_payload = {'model': S2T_MODEL}
+            s2t_headers = {'Authorization': f'Bearer {S2T_API_KEY}'}
+            
+            print(f"[Transcribe Stream] 正在调用 S2T API: {S2T_API_URL}")
+            start_time = time.time()
+            s2t_response = requests.post(S2T_API_URL, files=s2t_files, data=s2t_payload, headers=s2t_headers, timeout=300)
+            end_time = time.time()
+            print(f"[Transcribe Stream] S2T API 响应完毕. 状态码: {s2t_response.status_code}, 耗时: {end_time - start_time:.2f} 秒.")
+
+            if s2t_response.status_code != 200:
+                error_details = _extract_api_error_message(s2t_response)
+                print(f"[Transcribe Stream] S2T API 错误: {s2t_response.status_code} - {error_details}")
+                yield send_progress_event("ERROR", f"S2T API 返回错误: {s2t_response.status_code} - {error_details}", 100)
+                return
+            
+            raw_transcription = s2t_response.json().get('text', '').strip()
+            if not raw_transcription:
+                print("[Transcribe Stream] 错误: S2T 服务未能识别出任何文本。")
+                yield send_progress_event("ERROR", "S2T 服务未能识别出任何文本。", 100)
+                return
+            
+            # 阶段3: S2T 完成
+            yield send_progress_event("S2T_COMPLETE", "语音识别完成，获取到原始文本。", 40)
+            print("[Transcribe Stream] S2T 文本获取成功.")
+
+        except requests.exceptions.Timeout:
+            print(f"[Transcribe Stream] 错误: 调用 S2T API 超时 (超过300秒).")
+            yield send_progress_event("ERROR", "调用 S2T API 超时", 100)
+            return
+        except Exception as e:
+            print(f"[Transcribe Stream] 错误: 处理 S2T 请求时发生未知错误: {type(e).__name__} - {e}")
+            yield send_progress_event("ERROR", f"处理 S2T 请求时发生未知错误: {type(e).__name__}", 100)
+            return
+
+        # 阶段4: 文本优化开始
+        yield send_progress_event("OPTIMIZATION_START", "开始文本校准...", 45)
+        print("[Transcribe Stream] 正在调用文本优化...")
+        
+        # 定义进度回调函数
+        def progress_callback(stage, message, progress):
+            return send_progress_event(stage, message, progress)
+        
+        # 调用修改后的文本优化函数，传入进度回调
+        final_transcription, opt_message, is_calibrated = _perform_text_optimization_with_progress(
+            raw_transcription,
+            progress_callback=lambda stage, message, progress: None  # 暂时禁用进度回调，直接在这里处理
+        )
+        
+        # 手动发送优化进度事件（简化版本）
+        if len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
+            yield send_progress_event("OPTIMIZING_CHUNK", "正在校准文本块...", 70)
+            yield send_progress_event("OPTIMIZING_CHUNK", "文本校准进行中...", 85)
+        
+        # 阶段5: 优化完成
+        yield send_progress_event("OPTIMIZATION_COMPLETE", "文本校准完成。", 95)
+        print(f"[Transcribe Stream] 文本优化完成. 状态: {opt_message}")
+        
+        if is_calibrated:
+            final_status_message = f"转录完成，{opt_message}"
+        elif "跳过" in opt_message:
+            final_status_message = f"转录完成 ({opt_message.replace('校准已跳过', '校准服务')})"
+        else:
+            final_status_message = f"转录完成，{opt_message.replace('校准失败', '但校准失败')}"
+        
+        # 阶段6: 完成
+        result_data = {
+            "transcription": final_transcription,
+            "raw_transcription": raw_transcription,
+            "calibration_message": final_status_message,
+            "is_calibrated": is_calibrated
+        }
+        yield send_progress_event("DONE", "处理完成！", 100, result_data)
+        print("[Transcribe Stream] 请求处理完毕，正在返回结果。")
+    
+    return Response(stream_with_context(generate_progress()),
+                   mimetype='text/event-stream',
+                   headers={'Cache-Control': 'no-cache'})
+
 @app.route('/api/transcribe', methods=['POST'])
 def transcribe_and_optimize_audio():
     print("\n--- [Transcribe] 请求开始 ---")
@@ -575,7 +868,79 @@ def transcribe_and_optimize_audio():
         return jsonify({"error": "缺少上传的音频文件"}), 400
     
     try:
-        s2t_files = {'file': (audio_file.filename, audio_file.stream, audio_file.mimetype)}
+        # 修复方案：统一的安全文件处理策略
+        print(f"[Transcribe] 开始安全文件处理 - 文件名: {audio_file.filename}")
+        print(f"[DEBUG] 文件对象类型: {type(audio_file)}, 流类型: {type(audio_file.stream)}")
+        print(f"[DEBUG] 流状态检查 - closed: {getattr(audio_file.stream, 'closed', 'N/A')}")
+        
+        # 多种方法尝试读取文件内容
+        audio_content = None
+        try:
+            # 方法1：尝试直接从FileStorage读取
+            print("[DEBUG] 尝试方法1: 直接从FileStorage读取...")
+            if hasattr(audio_file.stream, 'seek'):
+                audio_file.stream.seek(0)
+            audio_content = audio_file.read()
+            print(f"[DEBUG] 方法1成功: 读取了 {len(audio_content)} 字节")
+        except Exception as method1_error:
+            print(f"[DEBUG] 方法1失败: {type(method1_error).__name__} - {method1_error}")
+            
+            # 方法2：尝试直接从底层流读取
+            print("[DEBUG] 尝试方法2: 直接从底层流读取...")
+            try:
+                if hasattr(audio_file.stream, 'seek'):
+                    audio_file.stream.seek(0)
+                audio_content = audio_file.stream.read()
+                print(f"[DEBUG] 方法2成功: 读取了 {len(audio_content)} 字节")
+            except Exception as method2_error:
+                print(f"[DEBUG] 方法2失败: {type(method2_error).__name__} - {method2_error}")
+                raise Exception(f"所有文件读取方法都失败了。最后错误: {method2_error}")
+        
+        if not audio_content:
+            print("[Transcribe] 错误: 上传的文件为空。")
+            return jsonify({"error": "上传的文件为空"}), 400
+        
+        print(f"[Transcribe] 文件内容读取成功，大小: {len(audio_content)} 字节")
+        
+        # 使用BytesIO创建独立的文件流，完全脱离原始Flask FileStorage对象
+        from io import BytesIO
+        audio_stream = BytesIO(audio_content)
+        
+        # 构建请求文件对象
+        s2t_files = {'file': (audio_file.filename, audio_stream, audio_file.mimetype)}
+        s2t_payload = {'model': S2T_MODEL}
+        s2t_headers = {'Authorization': f'Bearer {S2T_API_KEY}'}
+        
+        print(f"[Transcribe] 正在调用 S2T API: {S2T_API_URL}")
+        start_time = time.time()
+        s2t_response = requests.post(S2T_API_URL, files=s2t_files, data=s2t_payload, headers=s2t_headers, timeout=300)
+        end_time = time.time()
+        print(f"[Transcribe] S2T API 响应完毕. 状态码: {s2t_response.status_code}, 耗时: {end_time - start_time:.2f} 秒.")
+
+        if s2t_response.status_code != 200:
+            error_details = _extract_api_error_message(s2t_response)
+            print(f"[Transcribe] S2T API 错误: {s2t_response.status_code} - {error_details}")
+            return jsonify({"error": f"S2T API 返回错误: {s2t_response.status_code} - {error_details}"}), 500
+        
+        raw_transcription = s2t_response.json().get('text', '').strip()
+        if not raw_transcription:
+            print("[Transcribe] 错误: S2T 服务未能识别出任何文本。")
+            return jsonify({"error": "S2T 服务未能识别出任何文本。"}), 500
+        print("[Transcribe] S2T 文本获取成功.")
+
+    except Exception as file_error:
+        print(f"[Transcribe] 文件处理失败: {type(file_error).__name__} - {file_error}")
+        print(f"[DEBUG] 错误发生时流状态: closed={getattr(audio_file.stream, 'closed', 'N/A')}")
+        print(f"[DEBUG] FileStorage属性: {[attr for attr in dir(audio_file) if not attr.startswith('_')]}")
+        return jsonify({"error": f"文件处理失败: {type(file_error).__name__} - {file_error}"}), 500
+
+    try:
+        # 使用BytesIO创建独立的文件流，完全脱离原始Flask FileStorage对象
+        from io import BytesIO
+        audio_stream = BytesIO(audio_content)
+        
+        # 构建请求文件对象
+        s2t_files = {'file': (audio_file.filename, audio_stream, audio_file.mimetype)}
         s2t_payload = {'model': S2T_MODEL}
         s2t_headers = {'Authorization': f'Bearer {S2T_API_KEY}'}
         
