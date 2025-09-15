@@ -175,10 +175,14 @@ PROMPT_GENERATE_NOTES = """
 def _extract_api_error_message(response):
     try:
         error_detail = response.json()
-        api_err_msg = error_detail.get('error', {}).get('message') or error_detail.get('message') or error_detail.get('detail')
-        if api_err_msg: return str(api_err_msg)
+        if isinstance(error_detail, dict):
+            api_err_msg = error_detail.get('error', {}).get('message') or error_detail.get('message') or error_detail.get('detail')
+            if api_err_msg: return str(api_err_msg)
+        
+        # 如果响应是JSON编码的字符串或其他非字典类型，直接返回其文本表示
         return response.text[:200]
     except ValueError:
+        # 如果响应不是有效的JSON，返回其文本内容
         return response.text[:200]
 
 # 智能分块策略函数
@@ -218,6 +222,8 @@ def _get_last_sentence(text):
 def _optimize_chunk_with_retry(chunk_data):
     text_chunk = chunk_data['text']
     context_sentence = chunk_data.get('context')
+    chunk_index = chunk_data.get('index', 1)
+    total_chunks = chunk_data.get('total', 1)
     messages = [{"role": "system", "content": HARDCODED_OPTIMIZATION_PROMPT}]
     if context_sentence:
         user_content = (f"为了保持上下文连贯，这是紧接在当前文本之前的最后一句话：\n---CONTEXT---\n{context_sentence}\n---END CONTEXT---\n\n"
@@ -230,15 +236,16 @@ def _optimize_chunk_with_retry(chunk_data):
     
     # 重试机制，带有详细日志输出
     for attempt in range(RETRY_ATTEMPTS):
+        log_prefix = f"块 {chunk_index}/{total_chunks}"
         try:
-            print(f"校准API调用 (尝试 {attempt + 1}/{RETRY_ATTEMPTS})")
+            print(f"校准{log_prefix} (尝试 {attempt + 1}/{RETRY_ATTEMPTS})...")
             response = requests.post(OPT_API_URL, headers=headers, json=payload, timeout=300)
             
             if response.status_code == 200:
                 data = response.json()
                 content = data.get('choices', [{}])[0].get('message', {}).get('content', '').strip()
                 if content:
-                    print("校准成功")
+                    print(f"{log_prefix} 校准成功。")
                     return {"status": "success", "content": content}
                 else:
                     return {"status": "error", "message": "API返回空内容"}
@@ -257,12 +264,12 @@ def _optimize_chunk_with_retry(chunk_data):
         
         # 如果是最后一次重试，返回错误
         if attempt == RETRY_ATTEMPTS - 1:
-            print(f"校准失败: {error_msg}")
+            print(f"{log_prefix} 校准失败: {error_msg}")
             return {"status": "error", "message": error_msg}
         
         # 重试前等待
         wait_time = 2 * (attempt + 1)
-        print(f"校准失败，{wait_time}秒后重试: {error_msg}")
+        print(f"{log_prefix} 校准失败，{wait_time}秒后重试: {error_msg}")
         time.sleep(wait_time)
     
     return {"status": "error", "message": "未知错误，已达最大重试次数"}
@@ -285,25 +292,26 @@ def _perform_text_optimization(raw_text_to_optimize):
 
     if len(raw_text_to_optimize) <= CHUNK_PROCESSING_THRESHOLD:
         print("文本较短，直接进行单次校准...")
-        result = _optimize_chunk_with_retry({'text': raw_text_to_optimize})
+        result = _optimize_chunk_with_retry({'text': raw_text_to_optimize, 'index': 1, 'total': 1})
         if result['status'] == 'success':
             return result['content'], "校准成功！", True
         else:
             return raw_text_to_optimize, f"校准失败 ({result['message']})", False
             
-    print(f"文本过长({len(raw_text_to_optimize)}字)，启动分块并发校准...")
     chunks = _split_text_intelligently(raw_text_to_optimize)
-    tasks = [{'text': chunk, 'context': (_get_last_sentence(chunks[i-1]) if i > 0 else None)} for i, chunk in enumerate(chunks)]
+    total_chunks = len(chunks)
+    print(f"文本过长({len(raw_text_to_optimize)}字)，启动分块并发校准 (共 {total_chunks} 块)...")
+    tasks = [{'text': chunk, 'context': (_get_last_sentence(chunks[i-1]) if i > 0 else None), 'index': i + 1, 'total': total_chunks} for i, chunk in enumerate(chunks)]
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         processed_results = list(executor.map(_optimize_chunk_with_retry, tasks))
     failed_chunks = [res for res in processed_results if res['status'] == 'error']
     if failed_chunks:
         first_error_message = failed_chunks[0]['message']
-        print(f"校准过程中有块处理失败，回退到原始文本。失败原因: {first_error_message}")
+        print(f"校准过程中有 {len(failed_chunks)}/{total_chunks} 个块处理失败，回退到原始文本。首个失败原因: {first_error_message}")
         return raw_text_to_optimize, f"校准失败 ({first_error_message})", False
     else:
         full_optimized_text = "".join([res['content'] for res in processed_results])
-        print("所有块均已成功校准并合并。")
+        print(f"所有 {total_chunks} 个块均已成功校准并合并。")
         return full_optimized_text, "校准成功！", True
 
 # 要点提取逻辑函数
@@ -690,5 +698,5 @@ if __name__ == '__main__':
         print("API封装功能已启用。")
     
     print("\n--------------------\n")
-    print(f"服务器正在启动，监听 http://0.0.0.0:5000")
-    serve(app, host='0.0.0.0', port=5000)
+    print(f"服务器正在启动，监听 http://0.0.0.0:6701")
+    serve(app, host='0.0.0.0', port=6701)
