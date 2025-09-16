@@ -859,70 +859,67 @@ def transcribe_and_optimize_audio_stream():
             heartbeat_thread.start()
         
         try:
-            # 创建一个简化的心跳处理函数
-            def process_with_heartbeat():
-                # 在后台线程中执行文本优化
-                result_container = {}
-                exception_container = {}
-                
-                def optimization_worker():
-                    try:
-                        result = _perform_text_optimization_with_progress(
-                            raw_transcription,
-                            progress_callback=lambda stage, message, progress: None
-                        )
-                        result_container['result'] = result
-                    except Exception as e:
-                        exception_container['exception'] = e
-                
-                # 启动优化工作线程
-                opt_worker = threading.Thread(target=optimization_worker, daemon=True)
-                opt_worker.start()
-                
-                # 在主线程中处理心跳消息和进度更新
-                progress_sent = False
-                heartbeat_count = 0
-                
-                while opt_worker.is_alive():
-                    # 检查并发送心跳消息
-                    try:
-                        heartbeat_msg = heartbeat_queue.get(timeout=0.5)
-                        yield heartbeat_msg
-                        heartbeat_count += 1
-                        print(f"[Transcribe Stream] 发送心跳 #{heartbeat_count}")
-                    except queue.Empty:
-                        pass
-                    
-                    # 发送一次进度更新
-                    if not progress_sent and len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
-                        yield send_progress_event("OPTIMIZING_CHUNK", "正在校准文本块...", 70)
-                        progress_sent = True
-                
-                # 等待优化线程完成
-                opt_worker.join()
-                
-                # 处理剩余的心跳消息
-                while not heartbeat_queue.empty():
-                    try:
-                        heartbeat_msg = heartbeat_queue.get_nowait()
-                        yield heartbeat_msg
-                        heartbeat_count += 1
-                        print(f"[Transcribe Stream] 发送剩余心跳 #{heartbeat_count}")
-                    except queue.Empty:
-                        break
-                
-                # 检查是否有异常
-                if 'exception' in exception_container:
-                    raise exception_container['exception']
-                
-                # 获取结果
-                if 'result' not in result_container:
-                    raise Exception("文本优化未返回结果")
-                
-                return result_container['result']
+            # 创建结果容器和异常容器
+            result_container = {}
+            exception_container = {}
             
-            # 执行带心跳的优化处理
-            final_transcription, opt_message, is_calibrated = process_with_heartbeat()
+            def optimization_worker():
+                """在后台线程中执行文本优化"""
+                try:
+                    result = _perform_text_optimization_with_progress(
+                        raw_transcription,
+                        progress_callback=lambda stage, message, progress: None
+                    )
+                    result_container['result'] = result
+                except Exception as e:
+                    exception_container['exception'] = e
+            
+            # 启动优化工作线程
+            opt_worker = threading.Thread(target=optimization_worker, daemon=True)
+            opt_worker.start()
+            
+            # 在主线程中处理心跳消息和进度更新
+            progress_sent = False
+            heartbeat_count = 0
+            
+            while opt_worker.is_alive():
+                # 检查并发送心跳消息
+                try:
+                    heartbeat_msg = heartbeat_queue.get(timeout=0.5)
+                    yield heartbeat_msg
+                    heartbeat_count += 1
+                    print(f"[Transcribe Stream] 发送心跳 #{heartbeat_count}")
+                except queue.Empty:
+                    pass
+                
+                # 发送一次进度更新
+                if not progress_sent and len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
+                    yield send_progress_event("OPTIMIZING_CHUNK", "正在校准文本块...", 70)
+                    progress_sent = True
+            
+            # 等待优化线程完成
+            opt_worker.join()
+            
+            # 处理剩余的心跳消息
+            while not heartbeat_queue.empty():
+                try:
+                    heartbeat_msg = heartbeat_queue.get_nowait()
+                    yield heartbeat_msg
+                    heartbeat_count += 1
+                    print(f"[Transcribe Stream] 发送剩余心跳 #{heartbeat_count}")
+                except queue.Empty:
+                    break
+            
+            # 检查是否有异常
+            if 'exception' in exception_container:
+                raise exception_container['exception']
+            
+            # 获取结果
+            if 'result' not in result_container:
+                raise Exception("文本优化未返回结果")
+            
+            # 解包优化结果
+            final_transcription, opt_message, is_calibrated = result_container['result']
             
             # 发送最终进度更新
             if len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
