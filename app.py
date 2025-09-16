@@ -4,6 +4,8 @@ import os
 import time
 import re
 import json
+import threading
+import queue
 from concurrent.futures import ThreadPoolExecutor
 from waitress import serve
 
@@ -170,6 +172,32 @@ PROMPT_GENERATE_NOTES = """
 
 现在，请在`<待处理文本>`标签内提供您的视频转录内容，我将严格按照以上三阶段工作流程为您生成高质量的学术笔记。
 """
+
+# --- 心跳机制类 ---
+class HeartbeatThread(threading.Thread):
+    """
+    SSE 心跳线程类
+    用于在长耗时操作期间维持 SSE 连接活性
+    """
+    def __init__(self, heartbeat_queue, interval=15):
+        super().__init__(daemon=True)
+        self.heartbeat_queue = heartbeat_queue
+        self.interval = interval
+        self.stop_event = threading.Event()
+        
+    def run(self):
+        """心跳线程主循环"""
+        while not self.stop_event.wait(self.interval):
+            try:
+                # 发送心跳消息到队列
+                self.heartbeat_queue.put(": heartbeat\n\n", block=False)
+            except queue.Full:
+                # 如果队列满了，跳过这次心跳
+                pass
+    
+    def stop(self):
+        """停止心跳线程"""
+        self.stop_event.set()
 
 # --- 辅助函数 ---
 def _extract_api_error_message(response):
@@ -771,6 +799,10 @@ def transcribe_and_optimize_audio_stream():
                        headers={'Cache-Control': 'no-cache'})
     
     def generate_progress():
+        # 创建心跳队列
+        heartbeat_queue = queue.Queue(maxsize=10)
+        heartbeat_thread = None
+        
         try:
             # 阶段1: 任务启动
             yield send_progress_event("STARTING", "任务启动中...", 5)
@@ -815,24 +847,96 @@ def transcribe_and_optimize_audio_stream():
             yield send_progress_event("ERROR", f"处理 S2T 请求时发生未知错误: {type(e).__name__}", 100)
             return
 
-        # 阶段4: 文本优化开始
+        # 阶段4: 文本优化开始 - 启动心跳机制
         yield send_progress_event("OPTIMIZATION_START", "开始文本校准...", 45)
         print("[Transcribe Stream] 正在调用文本优化...")
         
-        # 定义进度回调函数
-        def progress_callback(stage, message, progress):
-            return send_progress_event(stage, message, progress)
-        
-        # 调用修改后的文本优化函数，传入进度回调
-        final_transcription, opt_message, is_calibrated = _perform_text_optimization_with_progress(
-            raw_transcription,
-            progress_callback=lambda stage, message, progress: None  # 暂时禁用进度回调，直接在这里处理
-        )
-        
-        # 手动发送优化进度事件（简化版本）
+        # 启动心跳线程（仅在长文本优化时）
+        opt_start_time = time.time()
         if len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
-            yield send_progress_event("OPTIMIZING_CHUNK", "正在校准文本块...", 70)
-            yield send_progress_event("OPTIMIZING_CHUNK", "文本校准进行中...", 85)
+            print("[Transcribe Stream] 检测到长文本，启动心跳机制...")
+            heartbeat_thread = HeartbeatThread(heartbeat_queue, interval=15)
+            heartbeat_thread.start()
+        
+        try:
+            # 创建一个简化的心跳处理函数
+            def process_with_heartbeat():
+                # 在后台线程中执行文本优化
+                result_container = {}
+                exception_container = {}
+                
+                def optimization_worker():
+                    try:
+                        result = _perform_text_optimization_with_progress(
+                            raw_transcription,
+                            progress_callback=lambda stage, message, progress: None
+                        )
+                        result_container['result'] = result
+                    except Exception as e:
+                        exception_container['exception'] = e
+                
+                # 启动优化工作线程
+                opt_worker = threading.Thread(target=optimization_worker, daemon=True)
+                opt_worker.start()
+                
+                # 在主线程中处理心跳消息和进度更新
+                progress_sent = False
+                heartbeat_count = 0
+                
+                while opt_worker.is_alive():
+                    # 检查并发送心跳消息
+                    try:
+                        heartbeat_msg = heartbeat_queue.get(timeout=0.5)
+                        yield heartbeat_msg
+                        heartbeat_count += 1
+                        print(f"[Transcribe Stream] 发送心跳 #{heartbeat_count}")
+                    except queue.Empty:
+                        pass
+                    
+                    # 发送一次进度更新
+                    if not progress_sent and len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
+                        yield send_progress_event("OPTIMIZING_CHUNK", "正在校准文本块...", 70)
+                        progress_sent = True
+                
+                # 等待优化线程完成
+                opt_worker.join()
+                
+                # 处理剩余的心跳消息
+                while not heartbeat_queue.empty():
+                    try:
+                        heartbeat_msg = heartbeat_queue.get_nowait()
+                        yield heartbeat_msg
+                        heartbeat_count += 1
+                        print(f"[Transcribe Stream] 发送剩余心跳 #{heartbeat_count}")
+                    except queue.Empty:
+                        break
+                
+                # 检查是否有异常
+                if 'exception' in exception_container:
+                    raise exception_container['exception']
+                
+                # 获取结果
+                if 'result' not in result_container:
+                    raise Exception("文本优化未返回结果")
+                
+                return result_container['result']
+            
+            # 执行带心跳的优化处理
+            final_transcription, opt_message, is_calibrated = process_with_heartbeat()
+            
+            # 发送最终进度更新
+            if len(raw_transcription) > CHUNK_PROCESSING_THRESHOLD:
+                yield send_progress_event("OPTIMIZING_CHUNK", "文本校准进行中...", 85)
+            
+        finally:
+            # 确保心跳线程被安全停止
+            if heartbeat_thread:
+                print("[Transcribe Stream] 停止心跳机制...")
+                heartbeat_thread.stop()
+                heartbeat_thread.join(timeout=2)  # 等待最多2秒
+                print("[Transcribe Stream] 心跳机制已停止")
+        
+        print(f"[Transcribe Stream] 文本优化完成，耗时 {time.time() - opt_start_time:.2f} 秒")
         
         # 阶段5: 优化完成
         yield send_progress_event("OPTIMIZATION_COMPLETE", "文本校准完成。", 95)
@@ -1063,5 +1167,5 @@ if __name__ == '__main__':
         print("API封装功能已启用。")
     
     print("\n--------------------\n")
-    print(f"服务器正在启动，监听 http://0.0.0.0:6701")
-    serve(app, host='0.0.0.0', port=6701)
+    print(f"服务器正在启动，监听 http://0.0.0.0:5000")
+    serve(app, host='0.0.0.0', port=5000)
