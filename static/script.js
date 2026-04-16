@@ -219,50 +219,61 @@ document.addEventListener('DOMContentLoaded', function() {
             .trim();
     }
 
-    function buildMarkdownExport() {
+    function buildTaskMarkdownExport(task, index) {
         const lines = [
-            '# 批量转录结果',
+            '# 转录结果',
             '',
             `生成时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
-            `任务总数：${tasks.length}`,
+            `文件名：${getTaskName(task)}`,
+            `任务序号：${index + 1}`,
             '',
         ];
 
-        tasks.forEach((task, index) => {
-            lines.push(`## ${index + 1}. ${getTaskName(task)}`);
+        lines.push(`- 状态：${getTaskStatusLabel(task)}`);
+        if (task.calibrationMessage) {
+            lines.push(`- 校准信息：${task.calibrationMessage}`);
+        }
+        if (task.errorMessage) {
+            lines.push(`- 错误信息：${task.errorMessage}`);
+        }
+        lines.push('');
+
+        if (task.transcription && task.transcription.trim()) {
+            lines.push('## 转录文本');
             lines.push('');
-            lines.push(`- 状态：${getTaskStatusLabel(task)}`);
-            if (task.calibrationMessage) {
-                lines.push(`- 校准信息：${task.calibrationMessage}`);
-            }
-            if (task.errorMessage) {
-                lines.push(`- 错误信息：${task.errorMessage}`);
-            }
+            lines.push(sanitizeMarkdownText(task.transcription));
             lines.push('');
+        }
 
-            if (task.transcription && task.transcription.trim()) {
-                lines.push('### 转录文本');
-                lines.push('');
-                lines.push(sanitizeMarkdownText(task.transcription));
-                lines.push('');
-            }
+        if (task.summaryText && task.summaryText.trim()) {
+            lines.push('## 摘要');
+            lines.push('');
+            lines.push(sanitizeMarkdownText(task.summaryText));
+            lines.push('');
+        }
 
-            if (task.summaryText && task.summaryText.trim()) {
-                lines.push('### 摘要');
-                lines.push('');
-                lines.push(sanitizeMarkdownText(task.summaryText));
-                lines.push('');
-            }
-
-            if (task.notesText && task.notesText.trim()) {
-                lines.push('### 笔记');
-                lines.push('');
-                lines.push(sanitizeMarkdownText(task.notesText));
-                lines.push('');
-            }
-        });
+        if (task.notesText && task.notesText.trim()) {
+            lines.push('## 笔记');
+            lines.push('');
+            lines.push(sanitizeMarkdownText(task.notesText));
+            lines.push('');
+        }
 
         return `${lines.join('\n').trim()}\n`;
+    }
+
+    function triggerMarkdownDownload(markdown, filename) {
+        const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(function() {
+            URL.revokeObjectURL(url);
+        }, 1000);
     }
 
     function exportMarkdown() {
@@ -271,7 +282,12 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        const markdown = buildMarkdownExport();
+        const exportableTasks = tasks.filter((task) => task.status === 'success' && task.transcription && task.transcription.trim());
+        if (!exportableTasks.length) {
+            updateStatus('当前没有可导出的已完成转录结果。', 'info');
+            return;
+        }
+
         const now = new Date();
         const timestamp = [
             now.getFullYear(),
@@ -282,18 +298,17 @@ document.addEventListener('DOMContentLoaded', function() {
             String(now.getMinutes()).padStart(2, '0'),
             String(now.getSeconds()).padStart(2, '0'),
         ].join('');
-        const firstTaskName = tasks.length ? sanitizeFilenamePart(getTaskName(tasks[0]).replace(/\.[^.]+$/, '')) : 'batch';
-        const filename = `speech-to-text-${firstTaskName}-${timestamp}.md`;
-        const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-        updateStatus(`已导出 Markdown：${filename}`, 'success');
+
+        exportableTasks.forEach((task, index) => {
+            const markdown = buildTaskMarkdownExport(task, index);
+            const taskName = sanitizeFilenamePart(getTaskName(task).replace(/\.[^.]+$/, ''));
+            const filename = `speech-to-text-${taskName || 'task'}-${timestamp}.md`;
+            window.setTimeout(function() {
+                triggerMarkdownDownload(markdown, filename);
+            }, index * 150);
+        });
+
+        updateStatus(`已为 ${exportableTasks.length} 个文件分别导出 Markdown。`, 'success');
     }
 
     function syncActionButtonLabels() {
