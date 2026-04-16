@@ -260,10 +260,21 @@ def register_routes(app, services: ServiceContainer) -> None:
         heartbeat_thread: Optional[HeartbeatThread] = None
         result_container: dict[str, object] = {}
         error_container: dict[str, Exception] = {}
+        progress_state: dict[str, object] = {}
+        optimization_started_at: Optional[float] = None
 
-        def progress_callback(stage: str, message: str, progress: int) -> None:
+        def progress_callback(
+            stage: str,
+            message: str,
+            progress: int,
+            data: Optional[dict[str, int]] = None,
+        ) -> None:
+            progress_state["stage"] = stage
+            progress_state["message"] = message
+            progress_state["progress"] = progress
+            progress_state["data"] = data or {}
             try:
-                progress_queue.put_nowait(send_progress_event(stage, message, progress))
+                progress_queue.put_nowait(send_progress_event(stage, message, progress, data))
             except queue.Full:
                 pass
 
@@ -289,6 +300,7 @@ def register_routes(app, services: ServiceContainer) -> None:
                 yield send_progress_event("OPTIMIZATION_START", "开始文本校准...", 45)
 
                 if len(raw_transcription) > services.config.chunk_processing_threshold:
+                    optimization_started_at = time.time()
                     heartbeat_thread = HeartbeatThread(heartbeat_queue, interval=15)
                     heartbeat_thread.start()
 
@@ -307,7 +319,23 @@ def register_routes(app, services: ServiceContainer) -> None:
                         pass
 
                     try:
-                        yield heartbeat_queue.get_nowait()
+                        heartbeat_msg = heartbeat_queue.get_nowait()
+                        yield heartbeat_msg
+                        if progress_state.get("stage") == "OPTIMIZING_CHUNK":
+                            elapsed = (
+                                int(time.time() - optimization_started_at)
+                                if optimization_started_at is not None
+                                else None
+                            )
+                            message = str(progress_state.get("message") or "正在校准文本块...")
+                            if elapsed is not None:
+                                message = f"{message} 已耗时 {elapsed} 秒"
+                            yield send_progress_event(
+                                "OPTIMIZING_CHUNK",
+                                message,
+                                int(progress_state.get("progress") or 70),
+                                progress_state.get("data") if isinstance(progress_state.get("data"), dict) else None,
+                            )
                     except queue.Empty:
                         pass
 

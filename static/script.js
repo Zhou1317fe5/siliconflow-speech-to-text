@@ -52,10 +52,14 @@ document.addEventListener('DOMContentLoaded', function() {
         progressBar.classList.add('pulsing');
     }
 
-    function updateProgress(progress, message) {
+    function updateProgress(progress, message, data) {
         progressBar.style.width = `${progress}%`;
         progressText.textContent = message;
-        progressPercent.textContent = `${progress}%`;
+        if (data && Number.isInteger(data.completed_chunks) && Number.isInteger(data.total_chunks)) {
+            progressPercent.textContent = `${progress}% (${data.completed_chunks}/${data.total_chunks})`;
+        } else {
+            progressPercent.textContent = `${progress}%`;
+        }
         if (progress >= 95) {
             progressBar.classList.remove('pulsing');
         }
@@ -136,7 +140,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function handleProgressEvent(eventData, submitBtnSpan, originalText) {
         const { stage, message, progress, data } = eventData;
-        updateProgress(progress, message);
+        updateProgress(progress, message, data);
 
         if (stage === 'DONE') {
             hideProgressBar();

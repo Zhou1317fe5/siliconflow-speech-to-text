@@ -17,7 +17,7 @@ from .prompts import (
 from .uploads import UploadedAudio
 
 
-ProgressCallback = Callable[[str, str, int], None]
+ProgressCallback = Callable[[str, str, int, Optional[dict[str, int]]], None]
 
 
 @dataclass
@@ -130,6 +130,11 @@ def _parallel_map(
                         "OPTIMIZING_CHUNK",
                         f"正在校准文本块 ({completed_count}/{len(items)})...",
                         progress,
+                        {
+                            "completed_chunks": completed_count,
+                            "total_chunks": len(items),
+                            "remaining_chunks": len(items) - completed_count,
+                        },
                     )
 
                 if result.get("status") == "cancelled":
@@ -221,6 +226,17 @@ def perform_text_optimization(
     chunks = split_text_intelligently(raw_text_to_optimize, services.config.chunk_target_size)
     total_chunks = len(chunks)
     print(f"文本过长({len(raw_text_to_optimize)}字)，启动分块并发校准 (共 {total_chunks} 块)...")
+    if progress_callback:
+        progress_callback(
+            "OPTIMIZING_CHUNK",
+            f"正在校准文本块 (0/{total_chunks})...",
+            48,
+            {
+                "completed_chunks": 0,
+                "total_chunks": total_chunks,
+                "remaining_chunks": total_chunks,
+            },
+        )
     tasks = [
         {
             "text": chunk,
