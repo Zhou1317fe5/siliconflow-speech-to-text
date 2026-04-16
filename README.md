@@ -178,6 +178,7 @@ docker run -d \
 version: '3.8'
 services:
   speech-to-text:
+    build: .
     image: speech-to-text:latest
     container_name: speech-to-text
     environment:

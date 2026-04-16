@@ -111,11 +111,7 @@ h1.text-title-gradient::after {
 }
 
 .native-file-input {
-    display: block;
-    min-width: 240px;
-    max-width: 100%;
-    font-size: 0.9rem;
-    color: #374151;
+    display: none;
 }
 
 .native-folder-input {
@@ -186,42 +182,41 @@ button:active:not(:disabled) {
     transform: translateY(0px);
 }
 button:disabled {
-    background-color: #e5e5e5 !important;
-    color: #a0a0a0 !important;
+    color: white !important;
     cursor: not-allowed;
     transform: none !important;
     box-shadow: none !important;
-    opacity: 0.75;
+    opacity: 0.6;
 }
 
 .submit-button {
-    background: linear-gradient(135deg, #007aff, #3478f6);
-    box-shadow: 0 4px 12px rgba(0, 122, 255, 0.22);
+    background: #0B79FD;
+    box-shadow: 0 4px 10px rgba(11, 121, 253, 0.3);
     width: 140px;
 }
 .submit-button:hover:not(:disabled) {
-    background: linear-gradient(135deg, #0071e6, #2968d9);
-    box-shadow: 0 6px 16px rgba(0, 122, 255, 0.28);
+    background: #0963D2;
+    box-shadow: 0 6px 14px rgba(11, 121, 253, 0.4);
 }
 .submit-button:active:not(:disabled) {
-    background: linear-gradient(135deg, #0065cc, #245cbc);
-    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.18);
+    background: #0655B3;
+    box-shadow: 0 2px 6px rgba(11, 121, 253, 0.3);
 }
 
 .export-button {
-    background: linear-gradient(135deg, #0f766e, #0f9b8e);
-    box-shadow: 0 4px 12px rgba(15, 118, 110, 0.2);
+    background: #00A67E;
+    box-shadow: 0 4px 10px rgba(0, 166, 126, 0.3);
     height: 42px;
     padding: 0.65rem 1rem;
     font-size: 0.9rem;
 }
 .export-button:hover:not(:disabled) {
-    background: linear-gradient(135deg, #0d9488, #0f766e);
-    box-shadow: 0 6px 16px rgba(15, 118, 110, 0.24);
+    background: #008B6A;
+    box-shadow: 0 6px 14px rgba(0, 166, 126, 0.4);
 }
 .export-button:active:not(:disabled) {
-    background: linear-gradient(135deg, #0f766e, #115e59);
-    box-shadow: 0 2px 8px rgba(15, 118, 110, 0.16);
+    background: #007357;
+    box-shadow: 0 2px 6px rgba(0, 166, 126, 0.3);
 }
 
 .results-content-wrapper {
@@ -391,19 +386,19 @@ button:disabled {
 
 .recalibrate-button,
 .copy-button {
-    background: linear-gradient(135deg, #007aff, #3478f6);
-    box-shadow: 0 4px 12px rgba(0, 122, 255, 0.22);
+    background: #0B79FD;
+    box-shadow: 0 4px 10px rgba(11, 121, 253, 0.3);
     width: 140px;
 }
 .recalibrate-button:hover:not(:disabled),
 .copy-button:hover:not(:disabled) {
-    background: linear-gradient(135deg, #0071e6, #2968d9);
-    box-shadow: 0 6px 16px rgba(0, 122, 255, 0.28);
+    background: #0963D2;
+    box-shadow: 0 6px 14px rgba(11, 121, 253, 0.4);
 }
 .recalibrate-button:active:not(:disabled),
 .copy-button:active:not(:disabled) {
-    background: linear-gradient(135deg, #0065cc, #245cbc);
-    box-shadow: 0 2px 8px rgba(0, 122, 255, 0.18);
+    background: #0655B3;
+    box-shadow: 0 2px 6px rgba(11, 121, 253, 0.3);
 }
 
 .copy-button.copied-success {
