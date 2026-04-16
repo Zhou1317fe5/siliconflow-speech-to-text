@@ -45,9 +45,15 @@ document.addEventListener('DOMContentLoaded', function() {
         } else {
             statusMessage.classList.add('hidden');
         }
-        if (message && (type === 'success' || type === 'error')) {
-            statusMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function scrollStatusIntoView() {
+        if (!statusMessage.textContent) {
+            return;
         }
+        window.requestAnimationFrame(function() {
+            statusMessage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        });
     }
 
     function createTask(file, persisted) {
@@ -73,6 +79,7 @@ document.addEventListener('DOMContentLoaded', function() {
             notesText: data.notesText || null,
             isShowingNotes: Boolean(data.isShowingNotes),
             errorMessage: data.errorMessage || null,
+            hasAutoScrolledFinalState: Boolean(data.hasAutoScrolledFinalState),
             requestId: 0,
         };
     }
@@ -96,6 +103,7 @@ document.addEventListener('DOMContentLoaded', function() {
             notesText: task.notesText,
             isShowingNotes: task.isShowingNotes,
             errorMessage: task.errorMessage,
+            hasAutoScrolledFinalState: task.hasAutoScrolledFinalState,
         };
     }
 
@@ -538,10 +546,12 @@ document.addEventListener('DOMContentLoaded', function() {
         task.calibrationMessage = null;
         task.isCalibrated = false;
         task.errorMessage = null;
+        task.hasAutoScrolledFinalState = false;
         resetGeneratedViews(task);
     }
 
     function applyServerTaskSnapshot(task, snapshot) {
+        const previousStatus = task.status;
         task.serverTaskId = snapshot.id || task.serverTaskId;
         task.filename = snapshot.filename || task.filename;
         task.status = snapshot.status || task.status;
@@ -554,6 +564,28 @@ document.addEventListener('DOMContentLoaded', function() {
         task.calibrationMessage = snapshot.calibration_message || null;
         task.isCalibrated = Boolean(snapshot.is_calibrated);
         task.errorMessage = snapshot.error_message || null;
+
+        const enteredFinalState =
+            !['success', 'error'].includes(previousStatus) &&
+            ['success', 'error'].includes(task.status);
+        if (enteredFinalState) {
+            task.hasAutoScrolledFinalState = false;
+        }
+    }
+
+    function maybeScrollSelectedTaskFinalState(task) {
+        if (!task || task.id !== selectedTaskId) {
+            return;
+        }
+        if (!['success', 'error'].includes(task.status)) {
+            return;
+        }
+        if (task.hasAutoScrolledFinalState) {
+            return;
+        }
+        scrollStatusIntoView();
+        task.hasAutoScrolledFinalState = true;
+        persistTasks();
     }
 
     function getPollTaskIds() {
@@ -604,11 +636,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 const snapshot = snapshotMap.get(task.serverTaskId);
                 if (snapshot) {
                     applyServerTaskSnapshot(task, snapshot);
+                    maybeScrollSelectedTaskFinalState(task);
                     return;
                 }
                 task.status = 'error';
                 task.message = '任务状态已丢失，可能是服务器已重启。';
                 task.errorMessage = task.message;
+                maybeScrollSelectedTaskFinalState(task);
             });
 
             renderAll();
@@ -658,6 +692,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 ensurePolling();
             }
             renderAll();
+            maybeScrollSelectedTaskFinalState(task);
         } catch (error) {
             if (task.requestId !== requestId) {
                 return;
@@ -667,6 +702,7 @@ document.addEventListener('DOMContentLoaded', function() {
             task.message = error.message;
             task.errorMessage = error.message;
             renderAll();
+            maybeScrollSelectedTaskFinalState(task);
         } finally {
             if (activeControllers.get(task.id) === controller) {
                 activeControllers.delete(task.id);
