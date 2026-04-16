@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import time
 
 import pytest
 import requests
@@ -63,6 +64,8 @@ def test_transcribe_route_calls_s2t_once_and_returns_success(client, monkeypatch
 
     monkeypatch.setattr("speech_to_text.routes.transcribe_audio", fake_transcribe)
     monkeypatch.setattr("speech_to_text.routes.perform_text_optimization", fake_optimize)
+    monkeypatch.setattr("speech_to_text.task_manager.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("speech_to_text.task_manager.perform_text_optimization", fake_optimize)
 
     response = client.post(
         "/api/transcribe",
@@ -90,6 +93,8 @@ def test_transcribe_stream_emits_expected_events(client, monkeypatch):
 
     monkeypatch.setattr("speech_to_text.routes.transcribe_audio", fake_transcribe)
     monkeypatch.setattr("speech_to_text.routes.perform_text_optimization", fake_optimize)
+    monkeypatch.setattr("speech_to_text.task_manager.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("speech_to_text.task_manager.perform_text_optimization", fake_optimize)
 
     response = client.post(
         "/api/transcribe-stream",
@@ -124,6 +129,8 @@ def test_transcribe_stream_emits_queue_waiting_stage(client, monkeypatch):
 
     monkeypatch.setattr("speech_to_text.routes.transcribe_audio", fake_transcribe)
     monkeypatch.setattr("speech_to_text.routes.perform_text_optimization", fake_optimize)
+    monkeypatch.setattr("speech_to_text.task_manager.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("speech_to_text.task_manager.perform_text_optimization", fake_optimize)
 
     response = client.post(
         "/api/transcribe-stream",
@@ -153,6 +160,57 @@ def test_upload_limit_returns_413_for_large_payload():
     )
     assert response.status_code == 413
     assert "超过限制" in response.get_json()["error"]
+
+
+def test_transcribe_task_routes_create_and_recover_status(client, monkeypatch):
+    def fake_transcribe(uploaded_audio, services, cancel_event=None, progress_callback=None):
+        del services
+        assert uploaded_audio.filename == "task.wav"
+        assert progress_callback is not None
+        progress_callback("WAITING_FOR_S2T_SLOT", "等待中", 9, {"slot_kind": "s2t", "wait_seconds": 1})
+        return "原始文本"
+
+    def fake_optimize(raw_text, services, progress_callback=None, cancel_event=None):
+        del services, cancel_event
+        assert raw_text == "原始文本"
+        assert progress_callback is not None
+        progress_callback("OPTIMIZING_CHUNK", "正在校准文本块 (1/1)...", 85)
+        return "校准后文本", "校准成功！", True
+
+    monkeypatch.setattr("speech_to_text.task_manager.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("speech_to_text.task_manager.perform_text_optimization", fake_optimize)
+
+    response = client.post(
+        "/api/transcribe-tasks",
+        data={"audio_file": (io.BytesIO(b"audio-bytes"), "task.wav")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 202
+    task = response.get_json()["task"]
+    assert task["id"]
+    assert task["filename"] == "task.wav"
+
+    deadline = time.time() + 2
+    last_payload = None
+    while time.time() < deadline:
+        poll_response = client.get(f"/api/transcribe-tasks/{task['id']}")
+        assert poll_response.status_code == 200
+        last_payload = poll_response.get_json()["task"]
+        if last_payload["status"] == "success":
+            break
+        time.sleep(0.05)
+
+    assert last_payload is not None
+    assert last_payload["status"] == "success"
+    assert last_payload["transcription"] == "校准后文本"
+    assert last_payload["raw_transcription"] == "原始文本"
+
+    list_response = client.get(f"/api/transcribe-tasks?ids={task['id']}")
+    assert list_response.status_code == 200
+    listed_tasks = list_response.get_json()["tasks"]
+    assert len(listed_tasks) == 1
+    assert listed_tasks[0]["id"] == task["id"]
 
 
 def test_openai_route_requires_auth(client):

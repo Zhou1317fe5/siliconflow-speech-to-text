@@ -20,15 +20,22 @@ document.addEventListener('DOMContentLoaded', function() {
     const resultTitle = document.getElementById('resultTitle');
     const exportMarkdownBtn = document.getElementById('exportMarkdownBtn');
 
-    let tasks = [];
-    let selectedTaskId = null;
-    let isBatchRunning = false;
-    let nextTaskId = 1;
-    const activeControllers = new Map();
+    const TASK_STORAGE_KEY = 'speech_to_text_tasks_v2';
+    const POLL_INTERVAL_MS = 2000;
+    const ACTIVE_STATUSES = new Set(['uploading', 'queued', 'processing']);
+    const RETRYABLE_STATUSES = new Set(['pending', 'error', 'cancelled']);
     const AUDIO_EXTENSIONS = new Set([
         '.aac', '.aiff', '.amr', '.flac', '.m4a', '.m4b', '.mid', '.midi', '.mp3',
         '.oga', '.ogg', '.opus', '.ra', '.wav', '.weba', '.webm', '.wma',
     ]);
+
+    let tasks = [];
+    let selectedTaskId = null;
+    let isBatchRunning = false;
+    let nextTaskId = 1;
+    let pollTimer = null;
+    let pollInFlight = false;
+    const activeControllers = new Map();
 
     function updateStatus(message, type) {
         statusMessage.textContent = message || '';
@@ -43,26 +50,93 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    function createTask(file) {
+    function createTask(file, persisted) {
+        const data = persisted || {};
+        const taskId = Number.isInteger(data.id) ? data.id : nextTaskId++;
+        nextTaskId = Math.max(nextTaskId, taskId + 1);
         return {
-            id: nextTaskId++,
-            file,
-            status: 'pending',
-            stage: 'PENDING',
-            message: '等待开始',
-            progress: 0,
-            progressData: null,
-            rawTranscription: null,
-            transcription: null,
-            calibrationMessage: null,
-            isCalibrated: false,
-            summaryText: null,
-            isShowingSummary: false,
-            notesText: null,
-            isShowingNotes: false,
-            errorMessage: null,
+            id: taskId,
+            serverTaskId: typeof data.serverTaskId === 'string' ? data.serverTaskId : null,
+            file: file || null,
+            filename: data.filename || (file ? file.name : '未命名文件'),
+            status: data.status || 'pending',
+            stage: data.stage || 'PENDING',
+            message: data.message || '等待开始',
+            progress: Number.isFinite(data.progress) ? data.progress : 0,
+            progressData: data.progressData || null,
+            rawTranscription: data.rawTranscription || null,
+            transcription: data.transcription || null,
+            calibrationMessage: data.calibrationMessage || null,
+            isCalibrated: Boolean(data.isCalibrated),
+            summaryText: data.summaryText || null,
+            isShowingSummary: Boolean(data.isShowingSummary),
+            notesText: data.notesText || null,
+            isShowingNotes: Boolean(data.isShowingNotes),
+            errorMessage: data.errorMessage || null,
             requestId: 0,
         };
+    }
+
+    function serializeTask(task) {
+        return {
+            id: task.id,
+            serverTaskId: task.serverTaskId,
+            filename: task.filename,
+            status: task.status,
+            stage: task.stage,
+            message: task.message,
+            progress: task.progress,
+            progressData: task.progressData,
+            rawTranscription: task.rawTranscription,
+            transcription: task.transcription,
+            calibrationMessage: task.calibrationMessage,
+            isCalibrated: task.isCalibrated,
+            summaryText: task.summaryText,
+            isShowingSummary: task.isShowingSummary,
+            notesText: task.notesText,
+            isShowingNotes: task.isShowingNotes,
+            errorMessage: task.errorMessage,
+        };
+    }
+
+    function persistTasks() {
+        const payload = {
+            selectedTaskId,
+            nextTaskId,
+            tasks: tasks.map(serializeTask),
+        };
+        try {
+            localStorage.setItem(TASK_STORAGE_KEY, JSON.stringify(payload));
+        } catch (error) {
+            console.error('无法保存任务状态:', error);
+        }
+    }
+
+    function restoreTasks() {
+        try {
+            const raw = localStorage.getItem(TASK_STORAGE_KEY);
+            if (!raw) {
+                return;
+            }
+            const parsed = JSON.parse(raw);
+            if (!parsed || !Array.isArray(parsed.tasks)) {
+                return;
+            }
+            tasks = parsed.tasks.map((task) => createTask(null, task));
+            if (Number.isInteger(parsed.nextTaskId)) {
+                nextTaskId = Math.max(nextTaskId, parsed.nextTaskId);
+            }
+            if (Number.isInteger(parsed.selectedTaskId)) {
+                selectedTaskId = parsed.selectedTaskId;
+            }
+            if (!getTaskById(selectedTaskId) && tasks.length) {
+                selectedTaskId = tasks[0].id;
+            }
+        } catch (error) {
+            console.error('恢复任务状态失败:', error);
+            tasks = [];
+            selectedTaskId = null;
+        }
     }
 
     function getTaskById(taskId) {
@@ -73,12 +147,20 @@ document.addEventListener('DOMContentLoaded', function() {
         return getTaskById(selectedTaskId);
     }
 
+    function getTaskName(task) {
+        return task ? task.filename : '';
+    }
+
+    function hasTaskSourceFile(task) {
+        return Boolean(task && task.file);
+    }
+
     function hasActiveTasks() {
-        return tasks.some((task) => ['uploading', 'queued', 'processing'].includes(task.status));
+        return tasks.some((task) => ACTIVE_STATUSES.has(task.status));
     }
 
     function hasRunnableTasks() {
-        return tasks.some((task) => ['pending', 'error', 'cancelled'].includes(task.status));
+        return tasks.some((task) => hasTaskSourceFile(task) && RETRYABLE_STATUSES.has(task.status));
     }
 
     function fileIdentity(file) {
@@ -147,7 +229,7 @@ document.addEventListener('DOMContentLoaded', function() {
         ];
 
         tasks.forEach((task, index) => {
-            lines.push(`## ${index + 1}. ${task.file.name}`);
+            lines.push(`## ${index + 1}. ${getTaskName(task)}`);
             lines.push('');
             lines.push(`- 状态：${getTaskStatusLabel(task)}`);
             if (task.calibrationMessage) {
@@ -200,7 +282,7 @@ document.addEventListener('DOMContentLoaded', function() {
             String(now.getMinutes()).padStart(2, '0'),
             String(now.getSeconds()).padStart(2, '0'),
         ].join('');
-        const firstTaskName = tasks.length ? sanitizeFilenamePart(tasks[0].file.name.replace(/\.[^.]+$/, '')) : 'batch';
+        const firstTaskName = tasks.length ? sanitizeFilenamePart(getTaskName(tasks[0]).replace(/\.[^.]+$/, '')) : 'batch';
         const filename = `speech-to-text-${firstTaskName}-${timestamp}.md`;
         const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
         const url = URL.createObjectURL(blob);
@@ -256,7 +338,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function updateOverallProgress() {
-        const activeCount = tasks.filter((task) => ['uploading', 'queued', 'processing'].includes(task.status)).length;
+        const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
         const finishedCount = tasks.filter((task) => ['success', 'error', 'cancelled'].includes(task.status)).length;
 
         if (!tasks.length || (!activeCount && !isBatchRunning)) {
@@ -280,7 +362,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function updateResultPanel() {
         const task = getSelectedTask();
-        resultTitle.textContent = task ? `转录结果 · ${task.file.name}` : '转录结果';
+        resultTitle.textContent = task ? `转录结果 · ${getTaskName(task)}` : '转录结果';
         transcriptionResult.textContent = getVisibleTaskText(task);
         syncActionButtonLabels();
 
@@ -290,45 +372,39 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         if (task.status === 'error') {
-            updateStatus(`文件 ${task.file.name} 处理失败: ${task.errorMessage || task.message}`, 'error');
+            updateStatus(`文件 ${getTaskName(task)} 处理失败: ${task.errorMessage || task.message}`, 'error');
             return;
         }
         if (task.status === 'cancelled') {
-            updateStatus(`文件 ${task.file.name} 的任务已取消。`, 'info');
+            updateStatus(`文件 ${getTaskName(task)} 的任务已取消。`, 'info');
             return;
         }
         if (task.status === 'success') {
             updateStatus(
-                task.calibrationMessage || `文件 ${task.file.name} 处理完成。`,
+                task.calibrationMessage || `文件 ${getTaskName(task)} 处理完成。`,
                 task.isCalibrated ? 'success' : 'info'
             );
             return;
         }
         if (task.status !== 'pending') {
-            updateStatus(`文件 ${task.file.name}: ${task.message}`, 'info');
+            updateStatus(`文件 ${getTaskName(task)}: ${task.message}`, 'info');
             return;
         }
-        updateStatus(`已选择文件 ${task.file.name}，等待开始处理。`, 'info');
+        updateStatus(`已选择文件 ${getTaskName(task)}，等待开始处理。`, 'info');
     }
 
     function setActionButtonsDisabledState() {
         const task = getSelectedTask();
         const hasContent = Boolean(task && task.transcription && task.transcription.trim() !== '');
-        const selectedTaskBusy = Boolean(task && ['uploading', 'queued', 'processing'].includes(task.status));
+        const selectedTaskBusy = Boolean(task && ACTIVE_STATUSES.has(task.status));
+        const visibleText = getVisibleTaskText(task);
 
         submitBtn.disabled = !hasRunnableTasks();
         recalibrateBtn.disabled = !hasContent || selectedTaskBusy;
         summarizeBtn.disabled = !hasContent || selectedTaskBusy;
         generateNotesBtn.disabled = !hasContent || selectedTaskBusy;
-        copyBtn.disabled = !getVisibleTaskText(task).trim();
+        copyBtn.disabled = !visibleText.trim();
         exportMarkdownBtn.disabled = !canExportMarkdown();
-    }
-
-    function setSelectedTask(taskId) {
-        selectedTaskId = taskId;
-        renderTaskList();
-        updateResultPanel();
-        setActionButtonsDisabledState();
     }
 
     function renderTaskList() {
@@ -342,7 +418,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
         const successCount = tasks.filter((task) => task.status === 'success').length;
         const errorCount = tasks.filter((task) => task.status === 'error').length;
-        const activeCount = tasks.filter((task) => ['uploading', 'queued', 'processing'].includes(task.status)).length;
+        const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
         queueSummary.textContent = `共 ${tasks.length} 个文件，已完成 ${successCount} 个，失败 ${errorCount} 个，处理中 ${activeCount} 个。`;
 
         tasks.forEach((task) => {
@@ -360,7 +436,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
             const name = document.createElement('div');
             name.className = 'task-item-name';
-            name.textContent = task.file.name;
+            name.textContent = getTaskName(task);
             header.appendChild(name);
 
             const status = document.createElement('span');
@@ -410,48 +486,38 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    function updateFileNameDisplay(files) {
-        if (!files.length) {
+    function setSelectedTask(taskId) {
+        selectedTaskId = taskId;
+        renderTaskList();
+        updateResultPanel();
+        setActionButtonsDisabledState();
+        persistTasks();
+    }
+
+    function renderAll() {
+        renderTaskList();
+        updateOverallProgress();
+        updateResultPanel();
+        setActionButtonsDisabledState();
+        persistTasks();
+    }
+
+    function updateFileNameDisplay(entries) {
+        const items = (entries || []).filter(Boolean);
+        if (!items.length) {
             fileNameDisplay.textContent = '未选择文件，可重复点击追加';
             return;
         }
-        const preview = files.slice(0, 3).map((file) => file.name).join('、');
-        if (files.length <= 3) {
-            fileNameDisplay.textContent = `已加入 ${files.length} 个文件：${preview}`;
+        const preview = items.slice(0, 3).map((entry) => typeof entry === 'string' ? entry : entry.name).join('、');
+        if (items.length <= 3) {
+            fileNameDisplay.textContent = `已加入 ${items.length} 个文件：${preview}`;
             return;
         }
-        fileNameDisplay.textContent = `已加入 ${files.length} 个文件：${preview} 等`;
-    }
-
-    function parseSSEChunk(buffer, onEvent) {
-        const events = buffer.split('\n\n');
-        const remaining = events.pop() || '';
-        for (const eventText of events) {
-            const lines = eventText.split('\n');
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        onEvent(JSON.parse(line.slice(6).trim()));
-                    } catch (error) {
-                        console.error('Failed to parse SSE data:', error, line);
-                    }
-                }
-            }
-        }
-        return remaining;
-    }
-
-    function extractSSEErrorMessage(text) {
-        let errorMessage = null;
-        parseSSEChunk(text, (eventData) => {
-            if (!errorMessage && eventData && eventData.message) {
-                errorMessage = eventData.message;
-            }
-        });
-        return errorMessage;
+        fileNameDisplay.textContent = `已加入 ${items.length} 个文件：${preview} 等`;
     }
 
     function clearTaskResult(task) {
+        task.serverTaskId = null;
         task.rawTranscription = null;
         task.transcription = null;
         task.calibrationMessage = null;
@@ -460,137 +526,141 @@ document.addEventListener('DOMContentLoaded', function() {
         resetGeneratedViews(task);
     }
 
-    function handleTaskProgressEvent(task, eventData) {
-        const { stage, message, progress, data } = eventData;
-        task.stage = stage;
-        task.message = message;
-        task.progress = progress;
-        task.progressData = data || null;
+    function applyServerTaskSnapshot(task, snapshot) {
+        task.serverTaskId = snapshot.id || task.serverTaskId;
+        task.filename = snapshot.filename || task.filename;
+        task.status = snapshot.status || task.status;
+        task.stage = snapshot.stage || task.stage;
+        task.message = snapshot.message || task.message;
+        task.progress = Number.isFinite(snapshot.progress) ? snapshot.progress : task.progress;
+        task.progressData = snapshot.progress_data || null;
+        task.rawTranscription = snapshot.raw_transcription || null;
+        task.transcription = snapshot.transcription || null;
+        task.calibrationMessage = snapshot.calibration_message || null;
+        task.isCalibrated = Boolean(snapshot.is_calibrated);
+        task.errorMessage = snapshot.error_message || null;
+    }
 
-        if (stage === 'QUEUED' || stage === 'WAITING_FOR_S2T_SLOT' || stage === 'WAITING_FOR_LLM_SLOT') {
-            task.status = 'queued';
-        } else if (stage === 'DONE') {
-            task.status = 'success';
-            if (data) {
-                task.rawTranscription = data.raw_transcription || null;
-                task.transcription = data.transcription || null;
-                task.calibrationMessage = data.calibration_message || null;
-                task.isCalibrated = Boolean(data.is_calibrated);
-                task.errorMessage = null;
-                resetGeneratedViews(task);
-            }
-            task.message = task.calibrationMessage || '处理完成';
-        } else if (stage === 'ERROR') {
-            task.status = 'error';
-            task.errorMessage = message;
-            task.message = message;
-        } else if (stage !== 'STARTING') {
-            task.status = 'processing';
-        } else {
-            task.status = 'uploading';
+    function getPollTaskIds() {
+        return tasks
+            .filter((task) => task.serverTaskId && ACTIVE_STATUSES.has(task.status))
+            .map((task) => task.serverTaskId);
+    }
+
+    function stopPollingIfIdle() {
+        if (getPollTaskIds().length || pollInFlight) {
+            return;
         }
-
-        renderTaskList();
-        updateOverallProgress();
-        if (task.id === selectedTaskId) {
-            updateResultPanel();
-            setActionButtonsDisabledState();
+        if (pollTimer !== null) {
+            window.clearInterval(pollTimer);
+            pollTimer = null;
         }
     }
 
-    function isCurrentTaskRequest(task, requestId) {
-        return getTaskById(task.id) === task && task.requestId === requestId;
+    function ensurePolling() {
+        if (getPollTaskIds().length && pollTimer === null) {
+            pollTimer = window.setInterval(pollTaskSnapshots, POLL_INTERVAL_MS);
+        }
+        stopPollingIfIdle();
+    }
+
+    async function pollTaskSnapshots() {
+        const ids = getPollTaskIds();
+        if (!ids.length || pollInFlight) {
+            stopPollingIfIdle();
+            return;
+        }
+
+        pollInFlight = true;
+        try {
+            const response = await fetch(`/api/transcribe-tasks?ids=${encodeURIComponent(ids.join(','))}`);
+            if (!response.ok) {
+                throw new Error(`请求失败 (状态 ${response.status})`);
+            }
+
+            const payload = await response.json();
+            const snapshots = Array.isArray(payload.tasks) ? payload.tasks : [];
+            const snapshotMap = new Map(snapshots.map((task) => [task.id, task]));
+
+            tasks.forEach((task) => {
+                if (!task.serverTaskId || !ACTIVE_STATUSES.has(task.status)) {
+                    return;
+                }
+                const snapshot = snapshotMap.get(task.serverTaskId);
+                if (snapshot) {
+                    applyServerTaskSnapshot(task, snapshot);
+                    return;
+                }
+                task.status = 'error';
+                task.message = '任务状态已丢失，可能是服务器已重启。';
+                task.errorMessage = task.message;
+            });
+
+            renderAll();
+        } catch (error) {
+            console.error('轮询任务状态失败:', error);
+        } finally {
+            pollInFlight = false;
+            stopPollingIfIdle();
+        }
     }
 
     async function submitTaskTranscription(task) {
+        if (!hasTaskSourceFile(task)) {
+            return;
+        }
+
         task.requestId += 1;
         const requestId = task.requestId;
         const controller = new AbortController();
         activeControllers.set(task.id, controller);
         clearTaskResult(task);
         task.status = 'uploading';
-        task.stage = 'STARTING';
-        task.message = '任务启动中...';
-        task.progress = 0;
+        task.stage = 'UPLOADING';
+        task.message = '正在上传并创建后台任务...';
+        task.progress = 1;
         task.progressData = null;
-        renderTaskList();
-        updateOverallProgress();
-        if (task.id === selectedTaskId) {
-            updateResultPanel();
-            setActionButtonsDisabledState();
-        }
+        renderAll();
 
         const formData = new FormData();
         formData.append('audio_file', task.file);
 
         try {
-            const response = await fetch('/api/transcribe-stream', {
+            const response = await fetch('/api/transcribe-tasks', {
                 method: 'POST',
                 body: formData,
                 signal: controller.signal,
             });
-
+            const data = await response.json();
             if (!response.ok) {
-                const errorText = await response.text();
-                const contentType = response.headers.get('content-type') || '';
-                if (contentType.includes('text/event-stream')) {
-                    const sseMessage = extractSSEErrorMessage(errorText);
-                    throw new Error(sseMessage || `请求失败 (状态 ${response.status})`);
-                }
-                throw new Error(errorText || `HTTP ${response.status}`);
+                throw new Error(data.error || `请求失败 (状态 ${response.status})`);
             }
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) {
-                    break;
-                }
-                if (!isCurrentTaskRequest(task, requestId)) {
-                    break;
-                }
-                buffer += decoder.decode(value, { stream: true });
-                buffer = parseSSEChunk(buffer, function(eventData) {
-                    if (isCurrentTaskRequest(task, requestId)) {
-                        handleTaskProgressEvent(task, eventData);
-                    }
-                });
-            }
-        } catch (error) {
-            if (!isCurrentTaskRequest(task, requestId)) {
+            if (task.requestId !== requestId) {
                 return;
             }
-            if (error.name === 'AbortError') {
-                task.status = 'cancelled';
-                task.message = '任务已取消';
-                task.errorMessage = '任务已取消';
-            } else {
-                console.error('转录错误:', error);
-                task.status = 'error';
-                task.message = error.message;
-                task.errorMessage = error.message;
+            if (data.task) {
+                applyServerTaskSnapshot(task, data.task);
+                ensurePolling();
             }
-            renderTaskList();
-            updateOverallProgress();
-            if (task.id === selectedTaskId) {
-                updateResultPanel();
+            renderAll();
+        } catch (error) {
+            if (task.requestId !== requestId) {
+                return;
             }
+            console.error('创建后台任务失败:', error);
+            task.status = 'error';
+            task.message = error.message;
+            task.errorMessage = error.message;
+            renderAll();
         } finally {
             if (activeControllers.get(task.id) === controller) {
                 activeControllers.delete(task.id);
-            }
-            updateOverallProgress();
-            if (task.id === selectedTaskId) {
-                setActionButtonsDisabledState();
             }
         }
     }
 
     async function startBatchTranscription() {
-        const runnableTasks = tasks.filter((task) => ['pending', 'error', 'cancelled'].includes(task.status));
+        const runnableTasks = tasks.filter((task) => hasTaskSourceFile(task) && RETRYABLE_STATUSES.has(task.status));
         if (!runnableTasks.length) {
             return;
         }
@@ -603,40 +673,32 @@ document.addEventListener('DOMContentLoaded', function() {
             await Promise.allSettled(runnableTasks.map((task) => submitTaskTranscription(task)));
         } finally {
             isBatchRunning = false;
-            updateOverallProgress();
-            renderTaskList();
-            setActionButtonsDisabledState();
+            renderAll();
 
-            const successCount = tasks.filter((task) => task.status === 'success').length;
-            const errorCount = tasks.filter((task) => task.status === 'error').length;
-            if (successCount && !errorCount) {
-                updateStatus(`全部 ${successCount} 个文件已处理完成。`, 'success');
-            } else if (successCount || errorCount) {
-                updateStatus(`批量处理结束：成功 ${successCount} 个，失败 ${errorCount} 个。`, errorCount ? 'info' : 'success');
+            const submittedCount = tasks.filter((task) => task.serverTaskId).length;
+            const uploadErrorCount = tasks.filter((task) => task.status === 'error' && !task.serverTaskId).length;
+            if (submittedCount && !uploadErrorCount) {
+                updateStatus(`已提交 ${submittedCount} 个任务，后台处理中，刷新后可继续查看状态。`, 'info');
+            } else if (submittedCount || uploadErrorCount) {
+                updateStatus(
+                    `任务提交结束：已提交 ${submittedCount} 个，提交失败 ${uploadErrorCount} 个。`,
+                    uploadErrorCount ? 'info' : 'success'
+                );
             }
-        }
-    }
-
-    function abortAllActiveRequests(silent) {
-        activeControllers.forEach((controller) => controller.abort());
-        activeControllers.clear();
-        isBatchRunning = false;
-        if (!silent) {
-            updateStatus('当前批量转录任务已取消。', 'info');
         }
     }
 
     function appendTasks(files) {
         const selectedFiles = getAudioFilesFromSelection(files);
         if (!selectedFiles.length) {
-            updateFileNameDisplay(tasks.map((task) => task.file));
+            updateFileNameDisplay(tasks.map((task) => ({ name: getTaskName(task) })));
             if (files && files.length) {
                 updateStatus('没有发现可导入的音频文件。', 'info');
             }
             return;
         }
 
-        const knownFiles = new Set(tasks.map((task) => fileIdentity(task.file)));
+        const knownFiles = new Set(tasks.filter((task) => task.file).map((task) => fileIdentity(task.file)));
         const newTasks = [];
         selectedFiles.forEach((file) => {
             const identity = fileIdentity(file);
@@ -657,11 +719,8 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!selectedTaskId) {
             selectedTaskId = newTasks[0].id;
         }
-        updateFileNameDisplay(tasks.map((task) => task.file));
-        renderTaskList();
-        updateOverallProgress();
-        updateResultPanel();
-        setActionButtonsDisabledState();
+        updateFileNameDisplay(tasks.map((task) => ({ name: getTaskName(task) })));
+        renderAll();
         audioFileInput.value = '';
 
         if (hasActiveTasks()) {
@@ -722,7 +781,7 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
-        updateStatus(`正在重新校准 ${task.file.name}...`, 'info');
+        updateStatus(`正在重新校准 ${getTaskName(task)}...`, 'info');
         setActionButtonsDisabledState();
         const originalText = recalibrateBtn.textContent;
         recalibrateBtn.textContent = '校准中...';
@@ -744,8 +803,7 @@ document.addEventListener('DOMContentLoaded', function() {
             task.message = data.calibration_message || '重新校准完成';
             task.errorMessage = null;
             resetGeneratedViews(task);
-            renderTaskList();
-            updateResultPanel();
+            renderAll();
         } catch (error) {
             console.error('重新校准错误:', error);
             updateStatus(`重新校准时发生错误: ${error.message}`, 'error');
@@ -765,14 +823,11 @@ document.addEventListener('DOMContentLoaded', function() {
         if (task.summaryText) {
             task.isShowingSummary = !task.isShowingSummary;
             task.isShowingNotes = false;
-            summarizeBtn.textContent = task.isShowingSummary ? '显示原文' : '显示摘要';
-            generateNotesBtn.textContent = task.notesText && task.isShowingNotes ? '显示原文' : '生成笔记';
-            updateResultPanel();
-            setActionButtonsDisabledState();
+            renderAll();
             return;
         }
 
-        updateStatus(`正在生成 ${task.file.name} 的摘要...`, 'info');
+        updateStatus(`正在生成 ${getTaskName(task)} 的摘要...`, 'info');
         setActionButtonsDisabledState();
         const originalText = summarizeBtn.textContent;
         summarizeBtn.textContent = '生成中...';
@@ -790,8 +845,7 @@ document.addEventListener('DOMContentLoaded', function() {
             task.summaryText = data.summary;
             task.isShowingSummary = true;
             task.isShowingNotes = false;
-            summarizeBtn.textContent = '显示原文';
-            updateResultPanel();
+            renderAll();
             updateStatus('摘要生成成功！', 'success');
         } catch (error) {
             console.error('生成摘要错误:', error);
@@ -812,14 +866,11 @@ document.addEventListener('DOMContentLoaded', function() {
         if (task.notesText) {
             task.isShowingNotes = !task.isShowingNotes;
             task.isShowingSummary = false;
-            generateNotesBtn.textContent = task.isShowingNotes ? '显示原文' : '显示笔记';
-            summarizeBtn.textContent = task.summaryText && task.isShowingSummary ? '显示原文' : '量子速读';
-            updateResultPanel();
-            setActionButtonsDisabledState();
+            renderAll();
             return;
         }
 
-        updateStatus(`正在生成 ${task.file.name} 的笔记...`, 'info');
+        updateStatus(`正在生成 ${getTaskName(task)} 的笔记...`, 'info');
         setActionButtonsDisabledState();
         const originalText = generateNotesBtn.textContent;
         generateNotesBtn.textContent = '生成中...';
@@ -837,8 +888,7 @@ document.addEventListener('DOMContentLoaded', function() {
             task.notesText = data.notes;
             task.isShowingNotes = true;
             task.isShowingSummary = false;
-            generateNotesBtn.textContent = '显示原文';
-            updateResultPanel();
+            renderAll();
             updateStatus('笔记生成成功！', 'success');
         } catch (error) {
             console.error('生成笔记错误:', error);
@@ -880,16 +930,14 @@ document.addEventListener('DOMContentLoaded', function() {
         exportMarkdown();
     });
 
-    window.addEventListener('beforeunload', function() {
-        abortAllActiveRequests(true);
-    });
-
-    window.addEventListener('pagehide', function() {
-        abortAllActiveRequests(true);
-    });
-
-    renderTaskList();
-    updateOverallProgress();
-    updateResultPanel();
-    setActionButtonsDisabledState();
+    restoreTasks();
+    if (tasks.length && !selectedTaskId) {
+        selectedTaskId = tasks[0].id;
+    }
+    updateFileNameDisplay(tasks.map((task) => ({ name: getTaskName(task) })));
+    renderAll();
+    ensurePolling();
+    if (getPollTaskIds().length) {
+        pollTaskSnapshots();
+    }
 });

@@ -18,6 +18,7 @@ from .errors import (
     ValidationError,
 )
 from .uploads import prepare_uploaded_audio
+from .task_manager import BackgroundTaskManager, run_transcription_pipeline
 from .workflows import (
     ServiceContainer,
     build_calibration_status_message,
@@ -92,6 +93,8 @@ def _require_text_field(field_name: str, label: str) -> str:
 
 
 def register_routes(app, services: ServiceContainer) -> None:
+    task_manager = BackgroundTaskManager(services)
+
     @app.before_request
     def check_openai_auth():
         if not request.path.startswith("/v1/"):
@@ -286,50 +289,12 @@ def register_routes(app, services: ServiceContainer) -> None:
                 pass
 
         def pipeline_worker() -> None:
-            try:
-                progress_callback("S2T_START", "正在进行语音识别...", 10)
-                raw_transcription = transcribe_audio(
-                    uploaded_audio,
-                    services,
-                    cancel_event,
-                    progress_callback,
-                )
-                progress_callback("S2T_COMPLETE", "语音识别完成，获取到原始文本。", 40)
-                progress_callback(
-                    "OPTIMIZATION_START",
-                    "开始文本校准...",
-                    45,
-                    {
-                        "enable_heartbeat": len(raw_transcription)
-                        > services.config.chunk_processing_threshold
-                    },
-                )
-                final_transcription, opt_message, is_calibrated = perform_text_optimization(
-                    raw_transcription,
-                    services,
-                    progress_callback=progress_callback,
-                    cancel_event=cancel_event,
-                )
-                progress_callback("OPTIMIZATION_COMPLETE", "文本校准完成。", 95)
-                progress_callback(
-                    "DONE",
-                    "处理完成！",
-                    100,
-                    {
-                        "transcription": final_transcription,
-                        "raw_transcription": raw_transcription,
-                        "calibration_message": build_calibration_status_message(
-                            opt_message, is_calibrated
-                        ),
-                        "is_calibrated": is_calibrated,
-                    },
-                )
-            except OperationCancelled:
-                return
-            except AppError as error:
-                progress_callback("ERROR", error.message, 100)
-            except Exception as error:
-                progress_callback("ERROR", f"处理请求时发生未知错误: {type(error).__name__}", 100)
+            run_transcription_pipeline(
+                uploaded_audio,
+                services,
+                progress_callback,
+                cancel_event=cancel_event,
+            )
 
         def generate_progress():
             nonlocal heartbeat_thread
@@ -409,6 +374,32 @@ def register_routes(app, services: ServiceContainer) -> None:
             mimetype="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @app.route("/api/transcribe-tasks", methods=["POST"])
+    def create_transcription_task():
+        audio_file = request.files.get("audio_file")
+        if not audio_file:
+            return _json_error_response(ValidationError("缺少上传的音频文件"))
+
+        try:
+            uploaded_audio = prepare_uploaded_audio(audio_file, services.config)
+            task = task_manager.create_transcription_task(uploaded_audio)
+            return jsonify({"task": task}), 202
+        except AppError as error:
+            return _json_error_response(error)
+
+    @app.route("/api/transcribe-tasks", methods=["GET"])
+    def list_transcription_tasks():
+        raw_ids = request.args.get("ids", "").strip()
+        ids = [item.strip() for item in raw_ids.split(",") if item.strip()] if raw_ids else None
+        return jsonify({"tasks": task_manager.list_tasks(ids)})
+
+    @app.route("/api/transcribe-tasks/<task_id>", methods=["GET"])
+    def get_transcription_task(task_id: str):
+        task = task_manager.get_task(task_id)
+        if task is None:
+            return _json_error_response(ValidationError("任务不存在或已过期"))
+        return jsonify({"task": task})
 
     @app.route("/api/recalibrate", methods=["POST"])
     def recalibrate_text():
