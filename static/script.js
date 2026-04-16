@@ -14,14 +14,23 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressBar = document.getElementById('progressBar');
     const progressText = document.getElementById('progressText');
     const progressPercent = document.getElementById('progressPercent');
-    const taskList = document.getElementById('taskList');
-    const taskEmptyState = document.getElementById('taskEmptyState');
+    const processingTaskList = document.getElementById('processingTaskList');
+    const processingTaskEmptyState = document.getElementById('processingTaskEmptyState');
+    const processingTaskCount = document.getElementById('processingTaskCount');
+    const historyTaskList = document.getElementById('historyTaskList');
+    const historyTaskEmptyState = document.getElementById('historyTaskEmptyState');
+    const historyTaskCount = document.getElementById('historyTaskCount');
+    const earlierTaskList = document.getElementById('earlierTaskList');
+    const earlierTaskEmptyState = document.getElementById('earlierTaskEmptyState');
+    const earlierTaskCount = document.getElementById('earlierTaskCount');
     const queueSummary = document.getElementById('queueSummary');
     const resultTitle = document.getElementById('resultTitle');
     const exportMarkdownBtn = document.getElementById('exportMarkdownBtn');
 
     const TASK_STORAGE_KEY = 'speech_to_text_tasks_v2';
     const POLL_INTERVAL_MS = 2000;
+    const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
+    const EARLIER_PURGE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
     const ACTIVE_STATUSES = new Set(['uploading', 'queued', 'processing']);
     const RETRYABLE_STATUSES = new Set(['pending', 'error', 'cancelled']);
     const AUDIO_EXTENSIONS = new Set([
@@ -80,11 +89,16 @@ document.addEventListener('DOMContentLoaded', function() {
             isShowingNotes: Boolean(data.isShowingNotes),
             errorMessage: data.errorMessage || null,
             hasAutoScrolledFinalState: Boolean(data.hasAutoScrolledFinalState),
+            createdAt: Number.isFinite(data.createdAt) ? data.createdAt : Date.now(),
+            updatedAt: Number.isFinite(data.updatedAt) ? data.updatedAt : Date.now(),
+            detailUnavailable: Boolean(data.detailUnavailable),
+            isHydratingDetails: false,
             requestId: 0,
         };
     }
 
     function serializeTask(task) {
+        const persistFullTask = shouldPersistFullTask(task);
         return {
             id: task.id,
             serverTaskId: task.serverTaskId,
@@ -94,16 +108,19 @@ document.addEventListener('DOMContentLoaded', function() {
             message: task.message,
             progress: task.progress,
             progressData: task.progressData,
-            rawTranscription: task.rawTranscription,
-            transcription: task.transcription,
+            rawTranscription: persistFullTask ? task.rawTranscription : null,
+            transcription: persistFullTask ? task.transcription : null,
             calibrationMessage: task.calibrationMessage,
             isCalibrated: task.isCalibrated,
-            summaryText: task.summaryText,
-            isShowingSummary: task.isShowingSummary,
-            notesText: task.notesText,
-            isShowingNotes: task.isShowingNotes,
+            summaryText: persistFullTask ? task.summaryText : null,
+            isShowingSummary: persistFullTask ? task.isShowingSummary : false,
+            notesText: persistFullTask ? task.notesText : null,
+            isShowingNotes: persistFullTask ? task.isShowingNotes : false,
             errorMessage: task.errorMessage,
             hasAutoScrolledFinalState: task.hasAutoScrolledFinalState,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+            detailUnavailable: task.detailUnavailable,
         };
     }
 
@@ -171,6 +188,72 @@ document.addEventListener('DOMContentLoaded', function() {
         return tasks.some((task) => hasTaskSourceFile(task) && RETRYABLE_STATUSES.has(task.status));
     }
 
+    function isFinalTask(task) {
+        return Boolean(task) && ['success', 'error', 'cancelled'].includes(task.status);
+    }
+
+    function getTaskTimestamp(task) {
+        return Number.isFinite(task.updatedAt) ? task.updatedAt : Number.isFinite(task.createdAt) ? task.createdAt : Date.now();
+    }
+
+    function getTaskBucket(task) {
+        if (!isFinalTask(task)) {
+            return 'processing';
+        }
+        const age = Date.now() - getTaskTimestamp(task);
+        if (age > EARLIER_PURGE_WINDOW_MS) {
+            return 'expired';
+        }
+        if (age > HISTORY_WINDOW_MS) {
+            return 'earlier';
+        }
+        return 'history';
+    }
+
+    function hasLoadedTaskContent(task) {
+        return Boolean(
+            task &&
+            (
+                (task.transcription && task.transcription.trim()) ||
+                (task.rawTranscription && task.rawTranscription.trim()) ||
+                (task.summaryText && task.summaryText.trim()) ||
+                (task.notesText && task.notesText.trim())
+            )
+        );
+    }
+
+    function compactTaskToSummary(task) {
+        if (!task || !isFinalTask(task) || task.id === selectedTaskId) {
+            return;
+        }
+        task.rawTranscription = null;
+        task.transcription = null;
+        task.summaryText = null;
+        task.notesText = null;
+        task.isShowingSummary = false;
+        task.isShowingNotes = false;
+    }
+
+    function compactHistoricalTasks() {
+        tasks.forEach((task) => {
+            if (getTaskBucket(task) !== 'processing') {
+                compactTaskToSummary(task);
+            }
+        });
+    }
+
+    function shouldPersistFullTask(task) {
+        return getTaskBucket(task) === 'processing';
+    }
+
+    function pruneExpiredTasks() {
+        const currentSelected = selectedTaskId;
+        tasks = tasks.filter((task) => getTaskBucket(task) !== 'expired');
+        if (!getTaskById(currentSelected)) {
+            selectedTaskId = tasks.length ? tasks[0].id : null;
+        }
+    }
+
     function fileIdentity(file) {
         return [file.name, file.size, file.lastModified].join('::');
     }
@@ -209,11 +292,52 @@ document.addEventListener('DOMContentLoaded', function() {
         if (task.isShowingSummary && task.summaryText) {
             return task.summaryText;
         }
-        return task.transcription || '';
+        if (task.transcription) {
+            return task.transcription;
+        }
+        return buildTaskSummaryText(task);
+    }
+
+    function formatTaskTime(task) {
+        const timestamp = getTaskTimestamp(task);
+        return new Date(timestamp).toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function buildTaskSummaryText(task) {
+        if (!task) {
+            return '';
+        }
+
+        const lines = [
+            '# 任务摘要',
+            '',
+            `文件名：${getTaskName(task)}`,
+            `状态：${getTaskStatusLabel(task)}`,
+            `更新时间：${formatTaskTime(task)}`,
+        ];
+
+        if (task.calibrationMessage) {
+            lines.push(`校准信息：${task.calibrationMessage}`);
+        } else if (task.message) {
+            lines.push(`说明：${task.message}`);
+        }
+
+        if (task.isHydratingDetails) {
+            lines.push('');
+            lines.push('正在从服务器恢复完整结果...');
+        } else if (task.detailUnavailable) {
+            lines.push('');
+            lines.push('完整结果已不可恢复，请查看此前导出的 Markdown。');
+        } else if (isFinalTask(task) && task.serverTaskId && !hasLoadedTaskContent(task)) {
+            lines.push('');
+            lines.push('该任务当前仅保留轻量摘要，点击后会尝试从服务器恢复完整结果。');
+        }
+
+        return `${lines.join('\n').trim()}\n`;
     }
 
     function canExportMarkdown() {
-        return tasks.some((task) => task.status === 'success' && task.transcription && task.transcription.trim());
+        return tasks.some((task) => task.status === 'success' && ((task.transcription && task.transcription.trim()) || task.serverTaskId));
     }
 
     function sanitizeMarkdownText(text) {
@@ -284,13 +408,26 @@ document.addEventListener('DOMContentLoaded', function() {
         }, 1000);
     }
 
-    function exportMarkdown() {
+    function normalizeExportTask(task, snapshot) {
+        return {
+            filename: (snapshot && snapshot.filename) || task.filename,
+            status: (snapshot && snapshot.status) || task.status,
+            calibrationMessage: (snapshot && snapshot.calibration_message) || task.calibrationMessage,
+            errorMessage: (snapshot && snapshot.error_message) || task.errorMessage,
+            transcription: (snapshot && snapshot.transcription) || task.transcription,
+            summaryText: task.summaryText,
+            notesText: task.notesText,
+            isCalibrated: (snapshot && snapshot.is_calibrated) || task.isCalibrated,
+        };
+    }
+
+    async function exportMarkdown() {
         if (!canExportMarkdown()) {
             updateStatus('当前没有可导出的已完成转录结果。', 'info');
             return;
         }
 
-        const exportableTasks = tasks.filter((task) => task.status === 'success' && task.transcription && task.transcription.trim());
+        const exportableTasks = tasks.filter((task) => task.status === 'success' && (task.transcription || task.serverTaskId));
         if (!exportableTasks.length) {
             updateStatus('当前没有可导出的已完成转录结果。', 'info');
             return;
@@ -307,16 +444,42 @@ document.addEventListener('DOMContentLoaded', function() {
             String(now.getSeconds()).padStart(2, '0'),
         ].join('');
 
-        exportableTasks.forEach((task, index) => {
-            const markdown = buildTaskMarkdownExport(task, index);
-            const taskName = sanitizeFilenamePart(getTaskName(task).replace(/\.[^.]+$/, ''));
-            const filename = `speech-to-text-${taskName || 'task'}-${timestamp}.md`;
-            window.setTimeout(function() {
-                triggerMarkdownDownload(markdown, filename);
-            }, index * 150);
-        });
+        let exportedCount = 0;
+        let skippedCount = 0;
 
-        updateStatus(`已为 ${exportableTasks.length} 个文件分别导出 Markdown。`, 'success');
+        for (const [index, task] of exportableTasks.entries()) {
+            let snapshot = null;
+            if ((!task.transcription || !task.transcription.trim()) && task.serverTaskId) {
+                try {
+                    snapshot = await fetchTaskSnapshot(task.serverTaskId);
+                } catch (error) {
+                    console.error('导出时恢复任务详情失败:', error);
+                }
+            }
+
+            const exportTask = normalizeExportTask(task, snapshot);
+            if (!exportTask.transcription || !String(exportTask.transcription).trim()) {
+                skippedCount += 1;
+                continue;
+            }
+
+            const markdown = buildTaskMarkdownExport(exportTask, index);
+            const taskName = sanitizeFilenamePart((exportTask.filename || 'task').replace(/\.[^.]+$/, ''));
+            const filename = `speech-to-text-${taskName || 'task'}-${timestamp}.md`;
+            triggerMarkdownDownload(markdown, filename);
+            exportedCount += 1;
+            if (index < exportableTasks.length - 1) {
+                await new Promise((resolve) => window.setTimeout(resolve, 150));
+            }
+        }
+
+        if (exportedCount && !skippedCount) {
+            updateStatus(`已为 ${exportedCount} 个文件分别导出 Markdown。`, 'success');
+            return;
+        }
+        if (exportedCount || skippedCount) {
+            updateStatus(`导出完成：成功 ${exportedCount} 个，跳过 ${skippedCount} 个。`, skippedCount ? 'info' : 'success');
+        }
     }
 
     function syncActionButtonLabels() {
@@ -430,21 +593,7 @@ document.addEventListener('DOMContentLoaded', function() {
         exportMarkdownBtn.disabled = !canExportMarkdown();
     }
 
-    function renderTaskList() {
-        taskList.innerHTML = '';
-        taskEmptyState.classList.toggle('hidden', tasks.length > 0);
-        if (!tasks.length) {
-            taskList.appendChild(taskEmptyState);
-            queueSummary.textContent = '选择多个音频后可并行转录，并分别查看结果。';
-            return;
-        }
-
-        const successCount = tasks.filter((task) => task.status === 'success').length;
-        const errorCount = tasks.filter((task) => task.status === 'error').length;
-        const activeCount = tasks.filter((task) => ACTIVE_STATUSES.has(task.status)).length;
-        queueSummary.textContent = `共 ${tasks.length} 个文件，已完成 ${successCount} 个，失败 ${errorCount} 个，处理中 ${activeCount} 个。`;
-
-        tasks.forEach((task) => {
+    function createTaskItem(task) {
             const item = document.createElement('div');
             item.className = 'task-item';
             if (task.id === selectedTaskId) {
@@ -504,20 +653,53 @@ document.addEventListener('DOMContentLoaded', function() {
             meta.appendChild(leftMeta);
             meta.appendChild(rightMeta);
             item.appendChild(meta);
+            return item;
+    }
 
-            taskList.appendChild(item);
+    function renderTaskSection(listElement, emptyElement, countElement, sectionTasks) {
+        listElement.innerHTML = '';
+        countElement.textContent = String(sectionTasks.length);
+        if (!sectionTasks.length) {
+            listElement.appendChild(emptyElement);
+            emptyElement.classList.remove('hidden');
+            return;
+        }
+        emptyElement.classList.add('hidden');
+        sectionTasks.forEach((task) => {
+            listElement.appendChild(createTaskItem(task));
         });
     }
 
-    function setSelectedTask(taskId) {
+    function renderTaskList() {
+        const processingTasks = tasks.filter((task) => getTaskBucket(task) === 'processing');
+        const historyTasks = tasks.filter((task) => getTaskBucket(task) === 'history');
+        const earlierTasks = tasks.filter((task) => getTaskBucket(task) === 'earlier');
+
+        if (!tasks.length) {
+            queueSummary.textContent = '选择多个音频后可并行转录，并分别查看结果。';
+        } else {
+            const successCount = tasks.filter((task) => task.status === 'success').length;
+            const errorCount = tasks.filter((task) => task.status === 'error').length;
+            queueSummary.textContent =
+                `正在处理 ${processingTasks.length} 个，历史 ${historyTasks.length} 个，更早 ${earlierTasks.length} 个，累计成功 ${successCount} 个，失败 ${errorCount} 个。`;
+        }
+
+        renderTaskSection(processingTaskList, processingTaskEmptyState, processingTaskCount, processingTasks);
+        renderTaskSection(historyTaskList, historyTaskEmptyState, historyTaskCount, historyTasks);
+        renderTaskSection(earlierTaskList, earlierTaskEmptyState, earlierTaskCount, earlierTasks);
+    }
+
+    async function setSelectedTask(taskId) {
+        const previousTask = getSelectedTask();
+        compactTaskToSummary(previousTask);
         selectedTaskId = taskId;
-        renderTaskList();
-        updateResultPanel();
-        setActionButtonsDisabledState();
-        persistTasks();
+        renderAll();
+        await ensureTaskDetailsLoaded(getSelectedTask());
     }
 
     function renderAll() {
+        pruneExpiredTasks();
+        compactHistoricalTasks();
         renderTaskList();
         updateOverallProgress();
         updateResultPanel();
@@ -547,6 +729,10 @@ document.addEventListener('DOMContentLoaded', function() {
         task.isCalibrated = false;
         task.errorMessage = null;
         task.hasAutoScrolledFinalState = false;
+        task.detailUnavailable = false;
+        task.isHydratingDetails = false;
+        task.createdAt = Date.now();
+        task.updatedAt = Date.now();
         resetGeneratedViews(task);
     }
 
@@ -564,12 +750,49 @@ document.addEventListener('DOMContentLoaded', function() {
         task.calibrationMessage = snapshot.calibration_message || null;
         task.isCalibrated = Boolean(snapshot.is_calibrated);
         task.errorMessage = snapshot.error_message || null;
+        task.createdAt = Number.isFinite(snapshot.created_at) ? snapshot.created_at * 1000 : task.createdAt;
+        task.updatedAt = Number.isFinite(snapshot.updated_at) ? snapshot.updated_at * 1000 : Date.now();
+        task.detailUnavailable = false;
 
         const enteredFinalState =
             !['success', 'error'].includes(previousStatus) &&
             ['success', 'error'].includes(task.status);
         if (enteredFinalState) {
             task.hasAutoScrolledFinalState = false;
+        }
+    }
+
+    async function fetchTaskSnapshot(taskId) {
+        const response = await fetch(`/api/transcribe-tasks/${encodeURIComponent(taskId)}`);
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || `请求失败 (状态 ${response.status})`);
+        }
+        return data.task || null;
+    }
+
+    async function ensureTaskDetailsLoaded(task) {
+        if (!task || !task.serverTaskId || task.isHydratingDetails || task.detailUnavailable || hasLoadedTaskContent(task)) {
+            return;
+        }
+        if (!isFinalTask(task)) {
+            return;
+        }
+
+        task.isHydratingDetails = true;
+        renderAll();
+        try {
+            const snapshot = await fetchTaskSnapshot(task.serverTaskId);
+            if (snapshot) {
+                applyServerTaskSnapshot(task, snapshot);
+            }
+        } catch (error) {
+            console.error('恢复任务详情失败:', error);
+            task.detailUnavailable = true;
+            task.message = error.message || '完整结果已不可恢复';
+        } finally {
+            task.isHydratingDetails = false;
+            renderAll();
         }
     }
 

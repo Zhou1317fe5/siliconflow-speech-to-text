@@ -69,8 +69,34 @@
                         导出 Markdown
                     </button>
                 </div>
-                <div id="taskList" class="task-list">
-                    <div id="taskEmptyState" class="task-empty-state">当前还没有待处理任务。</div>
+                <div class="task-sections">
+                    <section class="task-section">
+                        <div class="task-section-header">
+                            <h3 class="task-section-title">正在处理</h3>
+                            <span id="processingTaskCount" class="task-section-count">0</span>
+                        </div>
+                        <div id="processingTaskList" class="task-list">
+                            <div id="processingTaskEmptyState" class="task-empty-state">当前没有正在处理的任务。</div>
+                        </div>
+                    </section>
+                    <section class="task-section">
+                        <div class="task-section-header">
+                            <h3 class="task-section-title">历史任务</h3>
+                            <span id="historyTaskCount" class="task-section-count">0</span>
+                        </div>
+                        <div id="historyTaskList" class="task-list">
+                            <div id="historyTaskEmptyState" class="task-empty-state">最近没有历史任务。</div>
+                        </div>
+                    </section>
+                    <section class="task-section">
+                        <div class="task-section-header">
+                            <h3 class="task-section-title">更早的</h3>
+                            <span id="earlierTaskCount" class="task-section-count">0</span>
+                        </div>
+                        <div id="earlierTaskList" class="task-list">
+                            <div id="earlierTaskEmptyState" class="task-empty-state">当前没有更早的任务。</div>
+                        </div>
+                    </section>
                 </div>
             </div>
         </div>
