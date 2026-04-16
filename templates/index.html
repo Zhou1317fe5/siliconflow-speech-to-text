@@ -82,7 +82,18 @@
                     <section class="task-section">
                         <div class="task-section-header">
                             <h3 class="task-section-title">历史任务</h3>
-                            <span id="historyTaskCount" class="task-section-count">0</span>
+                            <div class="task-section-actions">
+                                <span id="historyTaskCount" class="task-section-count">0</span>
+                                <button
+                                    id="historyTaskToggle"
+                                    type="button"
+                                    class="task-section-toggle"
+                                    aria-expanded="true"
+                                    aria-controls="historyTaskList"
+                                >
+                                    收起
+                                </button>
+                            </div>
                         </div>
                         <div id="historyTaskList" class="task-list">
                             <div id="historyTaskEmptyState" class="task-empty-state">最近没有历史任务。</div>
@@ -91,7 +102,18 @@
                     <section class="task-section">
                         <div class="task-section-header">
                             <h3 class="task-section-title">更早的</h3>
-                            <span id="earlierTaskCount" class="task-section-count">0</span>
+                            <div class="task-section-actions">
+                                <span id="earlierTaskCount" class="task-section-count">0</span>
+                                <button
+                                    id="earlierTaskToggle"
+                                    type="button"
+                                    class="task-section-toggle"
+                                    aria-expanded="true"
+                                    aria-controls="earlierTaskList"
+                                >
+                                    收起
+                                </button>
+                            </div>
                         </div>
                         <div id="earlierTaskList" class="task-list">
                             <div id="earlierTaskEmptyState" class="task-empty-state">当前没有更早的任务。</div>

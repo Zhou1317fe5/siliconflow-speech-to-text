@@ -20,14 +20,17 @@ document.addEventListener('DOMContentLoaded', function() {
     const historyTaskList = document.getElementById('historyTaskList');
     const historyTaskEmptyState = document.getElementById('historyTaskEmptyState');
     const historyTaskCount = document.getElementById('historyTaskCount');
+    const historyTaskToggle = document.getElementById('historyTaskToggle');
     const earlierTaskList = document.getElementById('earlierTaskList');
     const earlierTaskEmptyState = document.getElementById('earlierTaskEmptyState');
     const earlierTaskCount = document.getElementById('earlierTaskCount');
+    const earlierTaskToggle = document.getElementById('earlierTaskToggle');
     const queueSummary = document.getElementById('queueSummary');
     const resultTitle = document.getElementById('resultTitle');
     const exportMarkdownBtn = document.getElementById('exportMarkdownBtn');
 
     const TASK_STORAGE_KEY = 'speech_to_text_tasks_v2';
+    const TASK_SECTION_STORAGE_KEY = 'speech_to_text_task_sections_v1';
     const POLL_INTERVAL_MS = 2000;
     const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
     const EARLIER_PURGE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -44,7 +47,52 @@ document.addEventListener('DOMContentLoaded', function() {
     let nextTaskId = 1;
     let pollTimer = null;
     let pollInFlight = false;
+    let sectionVisibility = loadSectionVisibility();
     const activeControllers = new Map();
+
+    function loadSectionVisibility() {
+        try {
+            const raw = window.localStorage.getItem(TASK_SECTION_STORAGE_KEY);
+            if (!raw) {
+                return { history: true, earlier: true };
+            }
+            const parsed = JSON.parse(raw);
+            return {
+                history: parsed.history !== false,
+                earlier: parsed.earlier !== false,
+            };
+        } catch (error) {
+            console.warn('读取任务区展开状态失败，已回退到默认值。', error);
+            return { history: true, earlier: true };
+        }
+    }
+
+    function persistSectionVisibility() {
+        try {
+            window.localStorage.setItem(TASK_SECTION_STORAGE_KEY, JSON.stringify(sectionVisibility));
+        } catch (error) {
+            console.warn('保存任务区展开状态失败。', error);
+        }
+    }
+
+    function applySectionVisibility() {
+        const sections = [
+            { visible: sectionVisibility.history, list: historyTaskList, toggle: historyTaskToggle },
+            { visible: sectionVisibility.earlier, list: earlierTaskList, toggle: earlierTaskToggle },
+        ];
+
+        sections.forEach(({ visible, list, toggle }) => {
+            list.classList.toggle('hidden', !visible);
+            toggle.textContent = visible ? '收起' : '展开';
+            toggle.setAttribute('aria-expanded', visible ? 'true' : 'false');
+        });
+    }
+
+    function setSectionVisibility(sectionName, visible) {
+        sectionVisibility[sectionName] = visible;
+        persistSectionVisibility();
+        applySectionVisibility();
+    }
 
     function updateStatus(message, type) {
         statusMessage.textContent = message || '';
@@ -340,6 +388,15 @@ document.addEventListener('DOMContentLoaded', function() {
         return tasks.some((task) => task.status === 'success' && ((task.transcription && task.transcription.trim()) || task.serverTaskId));
     }
 
+    function canExportSingleTask(task) {
+        return Boolean(
+            task &&
+            task.status === 'success' &&
+            getTaskBucket(task) !== 'processing' &&
+            ((task.transcription && task.transcription.trim()) || task.serverTaskId)
+        );
+    }
+
     function sanitizeMarkdownText(text) {
         return (text || '').replace(/\r\n/g, '\n').trim();
     }
@@ -421,6 +478,48 @@ document.addEventListener('DOMContentLoaded', function() {
         };
     }
 
+    async function exportSingleTask(task, index, options) {
+        const exportOptions = options || {};
+        let snapshot = null;
+        if ((!task.transcription || !task.transcription.trim()) && task.serverTaskId) {
+            try {
+                snapshot = await fetchTaskSnapshot(task.serverTaskId);
+            } catch (error) {
+                console.error('导出时恢复任务详情失败:', error);
+            }
+        }
+
+        const exportTask = normalizeExportTask(task, snapshot);
+        if (!exportTask.transcription || !String(exportTask.transcription).trim()) {
+            if (!exportOptions.silent) {
+                updateStatus(`文件 ${getTaskName(task)} 的完整结果当前不可导出。`, 'info');
+            }
+            return false;
+        }
+
+        const timestamp = exportOptions.timestamp || (() => {
+            const now = new Date();
+            return [
+                now.getFullYear(),
+                String(now.getMonth() + 1).padStart(2, '0'),
+                String(now.getDate()).padStart(2, '0'),
+                '-',
+                String(now.getHours()).padStart(2, '0'),
+                String(now.getMinutes()).padStart(2, '0'),
+                String(now.getSeconds()).padStart(2, '0'),
+            ].join('');
+        })();
+
+        const markdown = buildTaskMarkdownExport(exportTask, index);
+        const taskName = sanitizeFilenamePart((exportTask.filename || 'task').replace(/\.[^.]+$/, ''));
+        const filename = `speech-to-text-${taskName || 'task'}-${timestamp}.md`;
+        triggerMarkdownDownload(markdown, filename);
+        if (!exportOptions.silent) {
+            updateStatus(`已导出 ${getTaskName(task)} 的 Markdown。`, 'success');
+        }
+        return true;
+    }
+
     async function exportMarkdown() {
         if (!canExportMarkdown()) {
             updateStatus('当前没有可导出的已完成转录结果。', 'info');
@@ -448,26 +547,12 @@ document.addEventListener('DOMContentLoaded', function() {
         let skippedCount = 0;
 
         for (const [index, task] of exportableTasks.entries()) {
-            let snapshot = null;
-            if ((!task.transcription || !task.transcription.trim()) && task.serverTaskId) {
-                try {
-                    snapshot = await fetchTaskSnapshot(task.serverTaskId);
-                } catch (error) {
-                    console.error('导出时恢复任务详情失败:', error);
-                }
-            }
-
-            const exportTask = normalizeExportTask(task, snapshot);
-            if (!exportTask.transcription || !String(exportTask.transcription).trim()) {
+            const exported = await exportSingleTask(task, index, { silent: true, timestamp });
+            if (exported) {
+                exportedCount += 1;
+            } else {
                 skippedCount += 1;
-                continue;
             }
-
-            const markdown = buildTaskMarkdownExport(exportTask, index);
-            const taskName = sanitizeFilenamePart((exportTask.filename || 'task').replace(/\.[^.]+$/, ''));
-            const filename = `speech-to-text-${taskName || 'task'}-${timestamp}.md`;
-            triggerMarkdownDownload(markdown, filename);
-            exportedCount += 1;
             if (index < exportableTasks.length - 1) {
                 await new Promise((resolve) => window.setTimeout(resolve, 150));
             }
@@ -594,6 +679,7 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function createTaskItem(task) {
+            const bucket = getTaskBucket(task);
             const item = document.createElement('div');
             item.className = 'task-item';
             if (task.id === selectedTaskId) {
@@ -616,6 +702,28 @@ document.addEventListener('DOMContentLoaded', function() {
             status.textContent = getTaskStatusLabel(task);
             header.appendChild(status);
             item.appendChild(header);
+
+            if (canExportSingleTask(task)) {
+                const actionBar = document.createElement('div');
+                actionBar.className = 'task-item-actions';
+
+                const exportButton = document.createElement('button');
+                exportButton.type = 'button';
+                exportButton.className = 'task-item-export-button';
+                exportButton.textContent = bucket === 'history' ? '导出结果' : '导出单个';
+                exportButton.addEventListener('click', async function(event) {
+                    event.stopPropagation();
+                    exportButton.disabled = true;
+                    try {
+                        await exportSingleTask(task, task.id - 1);
+                    } finally {
+                        exportButton.disabled = false;
+                    }
+                });
+
+                actionBar.appendChild(exportButton);
+                item.appendChild(actionBar);
+            }
 
             const message = document.createElement('div');
             message.className = 'task-item-message';
@@ -701,6 +809,7 @@ document.addEventListener('DOMContentLoaded', function() {
         pruneExpiredTasks();
         compactHistoricalTasks();
         renderTaskList();
+        applySectionVisibility();
         updateOverallProgress();
         updateResultPanel();
         setActionButtonsDisabledState();
@@ -1202,6 +1311,14 @@ document.addEventListener('DOMContentLoaded', function() {
 
     exportMarkdownBtn.addEventListener('click', function() {
         exportMarkdown();
+    });
+
+    historyTaskToggle.addEventListener('click', function() {
+        setSectionVisibility('history', !sectionVisibility.history);
+    });
+
+    earlierTaskToggle.addEventListener('click', function() {
+        setSectionVisibility('earlier', !sectionVisibility.earlier);
     });
 
     restoreTasks();
