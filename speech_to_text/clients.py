@@ -139,41 +139,61 @@ class SpeechRecognitionClient:
             raise ConfigurationError("语音转录服务配置不完整: API URL无效")
 
         headers = {"Authorization": f"Bearer {self.config.s2t_api_key}"}
-        files = {"file": uploaded_audio.to_requests_file()}
         payload = {"model": self.config.s2t_model}
+        last_error = "S2T 服务未能识别出任何文本。"
+        last_error_code = "s2t_empty_text"
 
-        try:
-            with self.controller.reserve(
-                "s2t",
-                cancel_event=cancel_event,
-                progress_callback=progress_callback,
-            ):
-                response = requests.post(
-                    self.config.s2t_api_url,
-                    files=files,
-                    data=payload,
-                    headers=headers,
-                    timeout=self.config.upstream_timeout_seconds,
-                )
-        except requests.exceptions.Timeout as exc:
-            raise UpstreamTimeoutError("调用 S2T API 超时") from exc
-        except requests.exceptions.RequestException as exc:
-            raise UpstreamServiceError(f"调用 S2T API 失败: {type(exc).__name__}") from exc
+        for attempt in range(self.config.retry_attempts):
+            if cancel_event and cancel_event.is_set():
+                raise OperationCancelled()
 
-        if response.status_code != 200:
-            raise UpstreamServiceError(
-                f"S2T API 返回错误: {response.status_code} - {extract_api_error_message(response)}",
-                code="s2t_failed",
-            )
+            try:
+                with self.controller.reserve(
+                    "s2t",
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                ):
+                    response = requests.post(
+                        self.config.s2t_api_url,
+                        files={"file": uploaded_audio.to_requests_file()},
+                        data=payload,
+                        headers=headers,
+                        timeout=self.config.upstream_timeout_seconds,
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    raw_transcription = str(data.get("text", "")).strip()
+                    if raw_transcription:
+                        return raw_transcription
+                    last_error = "S2T 服务未能识别出任何文本。"
+                    last_error_code = "s2t_empty_text"
+                else:
+                    last_error = (
+                        f"S2T API 返回错误: {response.status_code} - {extract_api_error_message(response)}"
+                    )
+                    last_error_code = "s2t_failed"
+                    if response.status_code in CLIENT_ERROR_STATUSES:
+                        raise UpstreamServiceError(last_error, code="s2t_client_error")
+            except requests.exceptions.Timeout:
+                last_error = "调用 S2T API 超时"
+                last_error_code = "upstream_timeout"
+            except requests.exceptions.RequestException as exc:
+                last_error = f"调用 S2T API 失败: {type(exc).__name__}"
+                last_error_code = "s2t_failed"
+            except ValueError as exc:
+                last_error = "S2T API 返回了无效 JSON"
+                last_error_code = "s2t_invalid_json"
+                if attempt == self.config.retry_attempts - 1:
+                    raise UpstreamServiceError(last_error, code=last_error_code) from exc
 
-        try:
-            raw_transcription = response.json().get("text", "").strip()
-        except ValueError as exc:
-            raise UpstreamServiceError("S2T API 返回了无效 JSON", code="s2t_invalid_json") from exc
+            if attempt == self.config.retry_attempts - 1:
+                if last_error_code == "upstream_timeout":
+                    raise UpstreamTimeoutError(last_error)
+                raise UpstreamServiceError(last_error, code=last_error_code)
 
-        if not raw_transcription:
-            raise UpstreamServiceError("S2T 服务未能识别出任何文本。", code="s2t_empty_text")
-        return raw_transcription
+            sleep_with_cancel(2 * (attempt + 1), cancel_event)
+
+        raise UpstreamServiceError(last_error, code=last_error_code)
 
 
 @dataclass

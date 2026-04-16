@@ -115,6 +115,9 @@
   默认值：`30`
 - `MAX_CONCURRENT_WORKERS`
   默认值：`2`
+- `RETRY_ATTEMPTS`
+  默认值：`3`
+  同时作用于 S2T 转录和 LLM 文本处理请求
 
 
 ## 本地运行
@@ -165,6 +168,7 @@ docker run -d \
   -e LLM_MAX_CONCURRENT=4 \
   -e QUEUE_WAIT_TIMEOUT_SECONDS=30 \
   -e MAX_CONCURRENT_WORKERS=2 \
+  -e RETRY_ATTEMPTS=3 \
   speech-to-text:latest
 ```
 
@@ -220,6 +224,8 @@ services:
       - QUEUE_WAIT_TIMEOUT_SECONDS=30
       # 单个长任务的分块并发数（可选），默认: 2
       - MAX_CONCURRENT_WORKERS=2
+      # S2T 转录和 LLM 文本处理失败后的重试次数（可选），默认: 3
+      - RETRY_ATTEMPTS=3
     ports:
       - "your-port:5000"
 ```

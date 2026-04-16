@@ -3,12 +3,18 @@ from __future__ import annotations
 import io
 
 import pytest
+import requests
 
 from speech_to_text import create_app
-from speech_to_text.clients import ChatCompletionClient, UpstreamConcurrencyController
+from speech_to_text.clients import (
+    ChatCompletionClient,
+    SpeechRecognitionClient,
+    UpstreamConcurrencyController,
+)
 from speech_to_text.config import AppConfig
 from speech_to_text.errors import ConfigurationError
 from speech_to_text.prompts import PROMPT_GENERATE_NOTES
+from speech_to_text.uploads import UploadedAudio
 from speech_to_text.workflows import (
     ServiceContainer,
     perform_notes_generation,
@@ -185,6 +191,33 @@ def test_chat_completion_retries_empty_content(monkeypatch):
     )
     assert content == "成功内容"
     assert responses == []
+
+
+def test_s2t_retries_timeout_then_succeeds(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_post(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.exceptions.Timeout()
+        return FakeResponse(200, {"text": "成功转录"})
+
+    monkeypatch.setattr("speech_to_text.clients.requests.post", fake_post)
+    monkeypatch.setattr("speech_to_text.clients.sleep_with_cancel", lambda seconds, cancel_event: None)
+
+    client = SpeechRecognitionClient(
+        AppConfig.from_mapping({"S2T_API_KEY": "k", "RETRY_ATTEMPTS": "2"})
+    )
+    uploaded_audio = UploadedAudio(
+        filename="test.wav",
+        mimetype="audio/wav",
+        size=5,
+        stream=io.BytesIO(b"audio"),
+    )
+
+    content = client.transcribe(uploaded_audio)
+    assert content == "成功转录"
+    assert calls["count"] == 2
 
 
 def test_upstream_concurrency_controller_reports_waiting_state():
