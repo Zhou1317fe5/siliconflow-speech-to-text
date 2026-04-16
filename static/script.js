@@ -1,5 +1,7 @@
 document.addEventListener('DOMContentLoaded', function() {
     const audioFileInput = document.getElementById('audioFile');
+    const audioFolderInput = document.getElementById('audioFolder');
+    const uploadDropzone = document.getElementById('uploadDropzone');
     const fileNameDisplay = document.getElementById('fileNameDisplay');
     const submitBtn = document.getElementById('submitBtn');
     const statusMessage = document.getElementById('statusMessage');
@@ -23,6 +25,10 @@ document.addEventListener('DOMContentLoaded', function() {
     let isBatchRunning = false;
     let nextTaskId = 1;
     const activeControllers = new Map();
+    const AUDIO_EXTENSIONS = new Set([
+        '.aac', '.aiff', '.amr', '.flac', '.m4a', '.m4b', '.mid', '.midi', '.mp3',
+        '.oga', '.ogg', '.opus', '.ra', '.wav', '.weba', '.webm', '.wma',
+    ]);
 
     function updateStatus(message, type) {
         statusMessage.textContent = message || '';
@@ -77,6 +83,23 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function fileIdentity(file) {
         return [file.name, file.size, file.lastModified].join('::');
+    }
+
+    function isAudioLikeFile(file) {
+        if (!file) {
+            return false;
+        }
+        if (file.type && file.type.startsWith('audio/')) {
+            return true;
+        }
+        const fileName = String(file.name || '');
+        const dotIndex = fileName.lastIndexOf('.');
+        const extension = dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : '';
+        return AUDIO_EXTENSIONS.has(extension);
+    }
+
+    function getAudioFilesFromSelection(fileList) {
+        return Array.from(fileList || []).filter(isAudioLikeFile);
     }
 
     function resetGeneratedViews(task) {
@@ -604,14 +627,18 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function appendTasks(files) {
-        if (!files.length) {
+        const selectedFiles = getAudioFilesFromSelection(files);
+        if (!selectedFiles.length) {
             updateFileNameDisplay(tasks.map((task) => task.file));
+            if (files && files.length) {
+                updateStatus('没有发现可导入的音频文件。', 'info');
+            }
             return;
         }
 
         const knownFiles = new Set(tasks.map((task) => fileIdentity(task.file)));
         const newTasks = [];
-        files.forEach((file) => {
+        selectedFiles.forEach((file) => {
             const identity = fileIdentity(file);
             if (knownFiles.has(identity)) {
                 return;
@@ -643,8 +670,40 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     audioFileInput.addEventListener('change', function(event) {
-        const files = Array.from(event.target.files || []);
-        appendTasks(files);
+        appendTasks(event.target.files);
+    });
+
+    audioFolderInput.addEventListener('change', function(event) {
+        appendTasks(event.target.files);
+        audioFolderInput.value = '';
+    });
+
+    ['dragenter', 'dragover'].forEach((eventName) => {
+        uploadDropzone.addEventListener(eventName, function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            uploadDropzone.classList.add('drag-active');
+        });
+    });
+
+    ['dragleave', 'dragend'].forEach((eventName) => {
+        uploadDropzone.addEventListener(eventName, function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (event.relatedTarget && uploadDropzone.contains(event.relatedTarget)) {
+                return;
+            }
+            uploadDropzone.classList.remove('drag-active');
+        });
+    });
+
+    uploadDropzone.addEventListener('drop', function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        uploadDropzone.classList.remove('drag-active');
+        if (event.dataTransfer && event.dataTransfer.files) {
+            appendTasks(event.dataTransfer.files);
+        }
     });
 
     submitBtn.addEventListener('click', function(event) {

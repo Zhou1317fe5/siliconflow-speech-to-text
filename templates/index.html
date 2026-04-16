@@ -19,15 +19,22 @@
         </div>
 
         <form id="transcriptionForm" class="px-4 sm:px-6 md:px-10 pb-6 md:pb-8">
-            <div class="file-upload-section bg-gray-50/70 p-4 sm:p-5 rounded-xl shadow-custom-md flex flex-col sm:flex-row items-center sm:space-x-4 space-y-3 sm:space-y-0">
+            <div id="uploadDropzone" class="file-upload-section bg-gray-50/70 p-4 sm:p-5 rounded-xl shadow-custom-md flex flex-col sm:flex-row items-center sm:space-x-4 space-y-3 sm:space-y-0">
                 <div class="file-input-wrapper flex-shrink-0 w-full sm:w-auto">
-                    <label for="audioFile" class="file-input-label">
-                        <svg class="w-5 h-5 mr-2 -ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-                        选择音频
-                    </label>
+                    <div class="file-input-actions">
+                        <label for="audioFile" class="file-input-label">
+                            <svg class="w-5 h-5 mr-2 -ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                            选择音频
+                        </label>
+                        <label for="audioFolder" class="file-input-label file-input-label-secondary">
+                            选择文件夹
+                        </label>
+                    </div>
                     <input type="file" id="audioFile" name="audio_file" accept="audio/*" required multiple="multiple"
                            class="native-file-input mt-2 w-full sm:w-auto">
-                    <p class="file-input-hint">支持 `Ctrl` / `Shift` 多选，也可重复点击追加文件。</p>
+                    <input type="file" id="audioFolder" accept="audio/*" multiple webkitdirectory directory
+                           class="native-folder-input">
+                    <p class="file-input-hint">如果当前浏览器的文件选择器不支持 `Ctrl` / `Shift` 多选，可重复点击追加、直接拖拽多个文件，或选择整个文件夹批量导入。</p>
                 </div>
 
                 <span id="fileNameDisplay" class="file-name-display flex-grow text-sm text-gray-700 bg-white rounded-lg border border-gray-200 px-3 py-2.5 min-w-0 w-full text-center sm:text-left">未选择文件，可重复点击追加</span>
