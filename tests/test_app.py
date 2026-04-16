@@ -213,6 +213,57 @@ def test_transcribe_task_routes_create_and_recover_status(client, monkeypatch):
     assert listed_tasks[0]["id"] == task["id"]
 
 
+def test_transcribe_task_routes_delete_completed_tasks(client, monkeypatch):
+    def fake_transcribe(uploaded_audio, services, cancel_event=None, progress_callback=None):
+        del uploaded_audio, services, cancel_event
+        assert progress_callback is not None
+        return "原始文本"
+
+    def fake_optimize(raw_text, services, progress_callback=None, cancel_event=None):
+        del services, progress_callback, cancel_event
+        assert raw_text == "原始文本"
+        return "校准后文本", "校准成功！", True
+
+    monkeypatch.setattr("speech_to_text.task_manager.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("speech_to_text.task_manager.perform_text_optimization", fake_optimize)
+
+    response = client.post(
+        "/api/transcribe-tasks",
+        data={"audio_file": (io.BytesIO(b"audio-bytes"), "cleanup.wav")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 202
+    task = response.get_json()["task"]
+
+    deadline = time.time() + 2
+    last_payload = None
+    while time.time() < deadline:
+        poll_response = client.get(f"/api/transcribe-tasks/{task['id']}")
+        assert poll_response.status_code == 200
+        last_payload = poll_response.get_json()["task"]
+        if last_payload["status"] == "success":
+            break
+        time.sleep(0.05)
+
+    assert last_payload is not None
+    assert last_payload["status"] == "success"
+
+    delete_response = client.delete(
+        "/api/transcribe-tasks",
+        json={"task_ids": [task["id"]]},
+    )
+    assert delete_response.status_code == 200
+    delete_payload = delete_response.get_json()
+    assert delete_payload["deleted_ids"] == [task["id"]]
+    assert delete_payload["skipped_ids"] == []
+    assert delete_payload["missing_ids"] == []
+
+    missing_response = client.get(f"/api/transcribe-tasks/{task['id']}")
+    assert missing_response.status_code == 400
+    assert "任务不存在或已过期" in missing_response.get_json()["error"]
+
+
 def test_openai_route_requires_auth(client):
     response = client.get("/v1/models")
     assert response.status_code == 401

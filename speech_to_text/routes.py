@@ -394,6 +394,23 @@ def register_routes(app, services: ServiceContainer) -> None:
         ids = [item.strip() for item in raw_ids.split(",") if item.strip()] if raw_ids else None
         return jsonify({"tasks": task_manager.list_tasks(ids)})
 
+    @app.route("/api/transcribe-tasks", methods=["DELETE"])
+    def delete_transcription_tasks():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return _json_error_response(ValidationError("请求体无效或缺少 'task_ids' 字段"))
+
+        raw_ids = data.get("task_ids")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return _json_error_response(ValidationError("task_ids 必须是非空数组"))
+
+        task_ids = [task_id.strip() for task_id in raw_ids if isinstance(task_id, str) and task_id.strip()]
+        if not task_ids:
+            return _json_error_response(ValidationError("task_ids 必须包含有效任务 ID"))
+
+        result = task_manager.delete_tasks(task_ids)
+        return jsonify(result)
+
     @app.route("/api/transcribe-tasks/<task_id>", methods=["GET"])
     def get_transcription_task(task_id: str):
         task = task_manager.get_task(task_id)

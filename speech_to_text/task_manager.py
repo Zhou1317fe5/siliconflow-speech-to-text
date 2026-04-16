@@ -147,6 +147,41 @@ class BackgroundTaskManager:
                 return [self._tasks[task_id].to_dict() for task_id in ids if task_id in self._tasks]
             return [self._tasks[task_id].to_dict() for task_id in reversed(self._task_order)]
 
+    def delete_tasks(self, ids: list[str]) -> dict[str, object]:
+        with self._lock:
+            deleted_ids: list[str] = []
+            skipped_ids: list[str] = []
+            missing_ids: list[str] = []
+            seen_ids: set[str] = set()
+
+            for task_id in ids:
+                if task_id in seen_ids:
+                    continue
+                seen_ids.add(task_id)
+
+                task = self._tasks.get(task_id)
+                if task is None:
+                    missing_ids.append(task_id)
+                    continue
+                if task.status not in {"success", "error", "cancelled"}:
+                    skipped_ids.append(task_id)
+                    continue
+
+                deleted_ids.append(task_id)
+                self._tasks.pop(task_id, None)
+
+            if deleted_ids:
+                deleted_set = set(deleted_ids)
+                self._task_order = [
+                    task_id for task_id in self._task_order if task_id not in deleted_set
+                ]
+
+        return {
+            "deleted_ids": deleted_ids,
+            "skipped_ids": skipped_ids,
+            "missing_ids": missing_ids,
+        }
+
     def _trim_tasks_locked(self) -> None:
         while len(self._task_order) > self.max_tasks:
             oldest_id = self._task_order.pop(0)

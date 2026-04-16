@@ -210,13 +210,29 @@ button:disabled {
     padding: 0.65rem 1rem;
     font-size: 0.9rem;
 }
+.cleanup-button {
+    background: #f3f4f6;
+    color: #374151;
+    box-shadow: none;
+    border: 1px solid #d1d5db;
+    height: 42px;
+    padding: 0.65rem 1rem;
+    font-size: 0.9rem;
+}
 .export-button:hover:not(:disabled) {
     background: #008B6A;
     box-shadow: 0 6px 14px rgba(0, 166, 126, 0.4);
 }
+.cleanup-button:hover:not(:disabled) {
+    background: #e5e7eb;
+    border-color: #9ca3af;
+}
 .export-button:active:not(:disabled) {
     background: #007357;
     box-shadow: 0 2px 6px rgba(0, 166, 126, 0.3);
+}
+.cleanup-button:active:not(:disabled) {
+    background: #d1d5db;
 }
 
 .results-content-wrapper {
@@ -238,6 +254,12 @@ button:disabled {
     align-items: center;
     justify-content: space-between;
     margin-bottom: 0.875rem;
+}
+
+.task-board-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
 }
 
 .task-board-title {

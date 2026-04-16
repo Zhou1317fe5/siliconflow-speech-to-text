@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const queueSummary = document.getElementById('queueSummary');
     const resultTitle = document.getElementById('resultTitle');
     const exportMarkdownBtn = document.getElementById('exportMarkdownBtn');
+    const cleanupTasksBtn = document.getElementById('cleanupTasksBtn');
 
     const TASK_STORAGE_KEY = 'speech_to_text_tasks_v2';
     const TASK_SECTION_STORAGE_KEY = 'speech_to_text_task_sections_v1';
@@ -388,6 +389,14 @@ document.addEventListener('DOMContentLoaded', function() {
         return tasks.some((task) => task.status === 'success' && ((task.transcription && task.transcription.trim()) || task.serverTaskId));
     }
 
+    function getCleanupCandidates() {
+        return tasks.filter((task) => isFinalTask(task));
+    }
+
+    function canCleanupTasks() {
+        return getCleanupCandidates().length > 0;
+    }
+
     function canExportSingleTask(task) {
         return Boolean(
             task &&
@@ -567,6 +576,58 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    async function deleteServerTasks(taskIds) {
+        const response = await fetch('/api/transcribe-tasks', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_ids: taskIds }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || `请求失败 (状态 ${response.status})`);
+        }
+        return data;
+    }
+
+    async function cleanupTasks() {
+        const cleanupCandidates = getCleanupCandidates();
+        if (!cleanupCandidates.length) {
+            updateStatus('当前没有可清理的历史任务。', 'info');
+            return;
+        }
+
+        const confirmed = window.confirm(
+            `将清理 ${cleanupCandidates.length} 个已完成/失败/已取消任务。此操作会从当前页面和服务器内存中移除这些任务记录。`
+        );
+        if (!confirmed) {
+            return;
+        }
+
+        cleanupTasksBtn.disabled = true;
+        try {
+            const serverTaskIds = cleanupCandidates
+                .map((task) => task.serverTaskId)
+                .filter((taskId) => typeof taskId === 'string' && taskId);
+
+            if (serverTaskIds.length) {
+                await deleteServerTasks(serverTaskIds);
+            }
+
+            const deletedTaskIds = new Set(cleanupCandidates.map((task) => task.id));
+            tasks = tasks.filter((task) => !deletedTaskIds.has(task.id));
+            if (!getSelectedTask()) {
+                selectedTaskId = tasks.length ? tasks[0].id : null;
+            }
+
+            updateFileNameDisplay(tasks.map((task) => ({ name: getTaskName(task) })));
+            renderAll();
+            updateStatus(`已清理 ${cleanupCandidates.length} 个已完成任务。`, 'success');
+        } catch (error) {
+            console.error('清理任务失败:', error);
+            updateStatus(`清理任务失败：${error.message}`, 'error');
+        }
+    }
+
     function syncActionButtonLabels() {
         const task = getSelectedTask();
         if (!task) {
@@ -676,6 +737,7 @@ document.addEventListener('DOMContentLoaded', function() {
         generateNotesBtn.disabled = !hasContent || selectedTaskBusy;
         copyBtn.disabled = !visibleText.trim();
         exportMarkdownBtn.disabled = !canExportMarkdown();
+        cleanupTasksBtn.disabled = !canCleanupTasks();
     }
 
     function createTaskItem(task) {
@@ -1311,6 +1373,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
     exportMarkdownBtn.addEventListener('click', function() {
         exportMarkdown();
+    });
+
+    cleanupTasksBtn.addEventListener('click', function() {
+        cleanupTasks();
     });
 
     historyTaskToggle.addEventListener('click', function() {
