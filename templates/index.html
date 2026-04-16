@@ -33,7 +33,7 @@
 
                 <span id="fileNameDisplay" class="file-name-display flex-grow text-sm text-gray-700 bg-white rounded-lg border border-gray-200 px-3 py-2.5 min-w-0 w-full text-center sm:text-left">未选择文件</span>
 
-                <button type="button" id="submitBtn"
+                <button type="button" id="submitBtn" disabled
                         class="submit-button flex-shrink-0 w-full sm:w-auto">
                     <span>开始转录</span>
                 </button>
@@ -58,16 +58,16 @@
                 <div class="flex justify-between items-center mb-4 flex-shrink-0">
                     <h2 class="text-lg sm:text-xl font-semibold text-gray-800 flex-grow min-w-0 mr-4">转录结果</h2>
                     <div class="buttons-group flex space-x-2 flex-shrink-0">
-                        <button id="recalibrateBtn" class="recalibrate-button">
+                        <button id="recalibrateBtn" class="recalibrate-button" disabled>
                             重新校准
                         </button>
-                        <button id="summarizeBtn" class="recalibrate-button">
+                        <button id="summarizeBtn" class="recalibrate-button" disabled>
                             量子速读
                         </button>
-                        <button id="generateNotesBtn" class="recalibrate-button">
+                        <button id="generateNotesBtn" class="recalibrate-button" disabled>
                             生成笔记
                         </button>
-                        <button id="copyBtn" class="copy-button">
+                        <button id="copyBtn" class="copy-button" disabled>
                             复制文本
                         </button>
                     </div>

@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 将主应用脚本复制到工作目录
 COPY app.py . 
 
+# 将后端应用包复制到容器内
+COPY speech_to_text/ /app/speech_to_text/
+
 # 将模板文件复制到容器内的 templates 目录
 COPY templates/ /app/templates/
 
