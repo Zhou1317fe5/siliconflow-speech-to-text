@@ -45,7 +45,7 @@ class AppConfig:
 
     chunk_target_size: int = 5000
     chunk_processing_threshold: int = 5500
-    max_concurrent_workers: int = 3
+    max_concurrent_workers: int = 2
     retry_attempts: int = 3
 
     api_access_token: Optional[str] = None
@@ -54,6 +54,10 @@ class AppConfig:
 
     max_upload_size_mb: int = 50
     upstream_timeout_seconds: int = 300
+    waitress_threads: int = 8
+    s2t_max_concurrent: int = 2
+    llm_max_concurrent: int = 4
+    queue_wait_timeout_seconds: int = 30
 
     @property
     def max_upload_size_bytes(self) -> int:
@@ -102,6 +106,26 @@ class AppConfig:
                 "UPSTREAM_TIMEOUT_SECONDS",
                 cls.upstream_timeout_seconds,
             ),
+            waitress_threads=_parse_positive_int(
+                env.get("WAITRESS_THREADS"),
+                "WAITRESS_THREADS",
+                cls.waitress_threads,
+            ),
+            s2t_max_concurrent=_parse_positive_int(
+                env.get("S2T_MAX_CONCURRENT"),
+                "S2T_MAX_CONCURRENT",
+                cls.s2t_max_concurrent,
+            ),
+            llm_max_concurrent=_parse_positive_int(
+                env.get("LLM_MAX_CONCURRENT"),
+                "LLM_MAX_CONCURRENT",
+                cls.llm_max_concurrent,
+            ),
+            queue_wait_timeout_seconds=_parse_positive_int(
+                env.get("QUEUE_WAIT_TIMEOUT_SECONDS"),
+                "QUEUE_WAIT_TIMEOUT_SECONDS",
+                cls.queue_wait_timeout_seconds,
+            ),
         )
 
     @classmethod
@@ -144,6 +168,26 @@ class AppConfig:
                 env_like.get("UPSTREAM_TIMEOUT_SECONDS"),
                 "UPSTREAM_TIMEOUT_SECONDS",
                 cls.upstream_timeout_seconds,
+            ),
+            waitress_threads=_parse_positive_int(
+                env_like.get("WAITRESS_THREADS"),
+                "WAITRESS_THREADS",
+                cls.waitress_threads,
+            ),
+            s2t_max_concurrent=_parse_positive_int(
+                env_like.get("S2T_MAX_CONCURRENT"),
+                "S2T_MAX_CONCURRENT",
+                cls.s2t_max_concurrent,
+            ),
+            llm_max_concurrent=_parse_positive_int(
+                env_like.get("LLM_MAX_CONCURRENT"),
+                "LLM_MAX_CONCURRENT",
+                cls.llm_max_concurrent,
+            ),
+            queue_wait_timeout_seconds=_parse_positive_int(
+                env_like.get("QUEUE_WAIT_TIMEOUT_SECONDS"),
+                "QUEUE_WAIT_TIMEOUT_SECONDS",
+                cls.queue_wait_timeout_seconds,
             ),
         )
 
@@ -217,5 +261,10 @@ class AppConfig:
         messages.append("\n--- 运行参数 ---")
         messages.append(f"上传文件上限: {self.max_upload_size_mb} MB")
         messages.append(f"上游超时时间: {self.upstream_timeout_seconds} 秒")
+        messages.append(f"Waitress 线程数: {self.waitress_threads}")
+        messages.append(f"S2T 并发上限: {self.s2t_max_concurrent}")
+        messages.append(f"LLM 并发上限: {self.llm_max_concurrent}")
+        messages.append(f"队列等待超时: {self.queue_wait_timeout_seconds} 秒")
+        messages.append(f"单任务分块并发: {self.max_concurrent_workers}")
         messages.append("--------------------")
         return messages

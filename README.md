@@ -99,6 +99,23 @@
 - `API_ACCESS_TOKEN`
   启用 `/v1/*` 路由时使用的 Bearer Token
 
+### 运行参数
+
+- `MAX_UPLOAD_SIZE_MB`
+  默认值：`50`
+- `UPSTREAM_TIMEOUT_SECONDS`
+  默认值：`300`
+- `WAITRESS_THREADS`
+  默认值：`8`
+- `S2T_MAX_CONCURRENT`
+  默认值：`2`
+- `LLM_MAX_CONCURRENT`
+  默认值：`4`
+- `QUEUE_WAIT_TIMEOUT_SECONDS`
+  默认值：`30`
+- `MAX_CONCURRENT_WORKERS`
+  默认值：`2`
+
 
 ## 本地运行
 
@@ -143,6 +160,11 @@ docker run -d \
   -e API_ACCESS_TOKEN=your-api-auth-key \
   -e MAX_UPLOAD_SIZE_MB=50 \
   -e UPSTREAM_TIMEOUT_SECONDS=300 \
+  -e WAITRESS_THREADS=8 \
+  -e S2T_MAX_CONCURRENT=2 \
+  -e LLM_MAX_CONCURRENT=4 \
+  -e QUEUE_WAIT_TIMEOUT_SECONDS=30 \
+  -e MAX_CONCURRENT_WORKERS=2 \
   speech-to-text:latest
 ```
 
@@ -188,6 +210,16 @@ services:
       - MAX_UPLOAD_SIZE_MB=50
       # 上游请求超时时间（秒，可选），默认: 300
       - UPSTREAM_TIMEOUT_SECONDS=300
+      # Waitress 工作线程数（可选），默认: 8
+      - WAITRESS_THREADS=8
+      # 语音识别上游并发上限（可选），默认: 2
+      - S2T_MAX_CONCURRENT=2
+      # 文本处理上游并发上限（可选），默认: 4
+      - LLM_MAX_CONCURRENT=4
+      # 等待可用槽位超时时间（秒，可选），默认: 30
+      - QUEUE_WAIT_TIMEOUT_SECONDS=30
+      # 单个长任务的分块并发数（可选），默认: 2
+      - MAX_CONCURRENT_WORKERS=2
     ports:
       - "your-port:5000"
 ```

@@ -75,5 +75,15 @@ class UpstreamTimeoutError(AppError):
         )
 
 
+class ServiceBusyError(AppError):
+    def __init__(self, message: str, code: Optional[str] = "service_busy"):
+        super().__init__(
+            message=message,
+            status_code=429,
+            error_type="rate_limit_error",
+            code=code,
+        )
+
+
 class OperationCancelled(Exception):
     pass

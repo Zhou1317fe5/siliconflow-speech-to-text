@@ -17,7 +17,7 @@ from .prompts import (
 from .uploads import UploadedAudio
 
 
-ProgressCallback = Callable[[str, str, int, Optional[dict[str, int]]], None]
+ProgressCallback = Callable[[str, str, int, Optional[dict[str, object]]], None]
 
 
 @dataclass
@@ -82,8 +82,24 @@ def transcribe_audio(
     uploaded_audio: UploadedAudio,
     services: ServiceContainer,
     cancel_event: Optional[object] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> str:
-    return services.s2t_client.transcribe(uploaded_audio, cancel_event=cancel_event)
+    return services.s2t_client.transcribe(
+        uploaded_audio,
+        cancel_event=cancel_event,
+        progress_callback=progress_callback,
+    )
+
+
+def _effective_llm_workers(services: ServiceContainer, task_count: int) -> int:
+    return max(
+        1,
+        min(
+            services.config.max_concurrent_workers,
+            services.config.llm_max_concurrent,
+            task_count,
+        ),
+    )
 
 
 def _parallel_map(
@@ -172,6 +188,7 @@ def _optimize_chunk_with_retry(
     chunk_data: dict[str, object],
     services: ServiceContainer,
     cancel_event: Optional[object] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> dict[str, object]:
     text_chunk = str(chunk_data["text"])
     context_sentence = chunk_data.get("context")
@@ -188,6 +205,7 @@ def _optimize_chunk_with_retry(
             empty_message="API返回空内容",
             feature_name="校准",
             cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         print(f"{log_prefix} 校准成功。")
         return {"status": "success", "content": content}
@@ -216,6 +234,7 @@ def perform_text_optimization(
             {"text": raw_text_to_optimize, "index": 1, "total": 1},
             services,
             cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         if result["status"] == "success":
             return str(result["content"]), "校准成功！", True
@@ -249,8 +268,13 @@ def perform_text_optimization(
 
     processed_results = _parallel_map(
         tasks,
-        lambda item, event: _optimize_chunk_with_retry(item, services, event),
-        max_workers=services.config.max_concurrent_workers,
+        lambda item, event: _optimize_chunk_with_retry(
+            item,
+            services,
+            event,
+            progress_callback,
+        ),
+        max_workers=_effective_llm_workers(services, len(tasks)),
         cancel_event=cancel_event,
         progress_callback=progress_callback,
     )
@@ -272,6 +296,7 @@ def _map_summary_chunk(
     task: dict[str, object],
     services: ServiceContainer,
     cancel_event: Optional[object] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> dict[str, object]:
     try:
         content = services.chat_client.complete(
@@ -284,6 +309,7 @@ def _map_summary_chunk(
             empty_message="API为Map阶段返回空内容",
             feature_name="摘要生成",
             cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         return {"status": "success", "content": content}
     except OperationCancelled:
@@ -403,7 +429,7 @@ def perform_summarization(
     map_results = _parallel_map(
         tasks,
         lambda item, event: _map_summary_chunk(item, services, event),
-        max_workers=services.config.max_concurrent_workers,
+        max_workers=_effective_llm_workers(services, len(tasks)),
         cancel_event=cancel_event,
     )
 
@@ -450,6 +476,7 @@ def _map_notes_chunk(
     task: dict[str, object],
     services: ServiceContainer,
     cancel_event: Optional[object] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> dict[str, object]:
     try:
         content = services.chat_client.complete(
@@ -462,6 +489,7 @@ def _map_notes_chunk(
             empty_message="笔记分块生成返回空内容",
             feature_name="笔记生成",
             cancel_event=cancel_event,
+            progress_callback=progress_callback,
         )
         return {"status": "success", "content": content}
     except OperationCancelled:
@@ -500,7 +528,7 @@ def perform_notes_generation(
     map_results = _parallel_map(
         tasks,
         lambda item, event: _map_notes_chunk(item, services, event),
-        max_workers=services.config.max_concurrent_workers,
+        max_workers=_effective_llm_workers(services, len(tasks)),
         cancel_event=cancel_event,
     )
     failed_chunks = [result for result in map_results if result["status"] == "error"]

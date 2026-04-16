@@ -5,7 +5,7 @@ from typing import Mapping, Optional
 
 from flask import Flask
 
-from .clients import ChatCompletionClient, SpeechRecognitionClient
+from .clients import ChatCompletionClient, SpeechRecognitionClient, UpstreamConcurrencyController
 from .config import AppConfig
 from .routes import register_routes
 from .workflows import ServiceContainer
@@ -21,6 +21,8 @@ def create_app(config: Optional[object] = None) -> Flask:
     else:
         raise TypeError("config 必须是 AppConfig、mapping 或 None")
 
+    app_config.validate_runtime()
+
     root_dir = Path(__file__).resolve().parent.parent
     app = Flask(
         __name__,
@@ -30,10 +32,11 @@ def create_app(config: Optional[object] = None) -> Flask:
     )
     app.config["MAX_CONTENT_LENGTH"] = app_config.max_upload_size_bytes
 
+    concurrency_controller = UpstreamConcurrencyController(app_config)
     services = ServiceContainer(
         config=app_config,
-        s2t_client=SpeechRecognitionClient(app_config),
-        chat_client=ChatCompletionClient(app_config),
+        s2t_client=SpeechRecognitionClient(app_config, controller=concurrency_controller),
+        chat_client=ChatCompletionClient(app_config, controller=concurrency_controller),
     )
     register_routes(app, services)
     return app

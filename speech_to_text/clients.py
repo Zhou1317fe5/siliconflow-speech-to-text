@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional
+from dataclasses import field
+from typing import Callable, Iterator, Optional
 
 import requests
 
@@ -10,12 +13,14 @@ from .config import AppConfig
 from .errors import (
     ConfigurationError,
     OperationCancelled,
+    ServiceBusyError,
     UpstreamServiceError,
     UpstreamTimeoutError,
 )
 from .uploads import UploadedAudio
 
 CLIENT_ERROR_STATUSES = {400, 401, 403, 404, 409, 422, 429}
+StatusCallback = Callable[[str, str, int, Optional[dict[str, object]]], None]
 
 
 def extract_api_error_message(response: requests.Response) -> str:
@@ -43,10 +48,89 @@ def sleep_with_cancel(seconds: int, cancel_event: Optional[object]) -> None:
 
 
 @dataclass
+class UpstreamConcurrencyController:
+    config: AppConfig
+    _s2t_slots: threading.BoundedSemaphore = field(init=False, repr=False)
+    _llm_slots: threading.BoundedSemaphore = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._s2t_slots = threading.BoundedSemaphore(self.config.s2t_max_concurrent)
+        self._llm_slots = threading.BoundedSemaphore(self.config.llm_max_concurrent)
+
+    def _slot_definition(self, slot_kind: str) -> tuple[threading.BoundedSemaphore, str, str, int]:
+        if slot_kind == "s2t":
+            return self._s2t_slots, "语音识别", "WAITING_FOR_S2T_SLOT", 9
+        if slot_kind == "llm":
+            return self._llm_slots, "文本处理", "WAITING_FOR_LLM_SLOT", 47
+        raise ValueError(f"未知的上游槽位类型: {slot_kind}")
+
+    @contextmanager
+    def reserve(
+        self,
+        slot_kind: str,
+        *,
+        cancel_event: Optional[object] = None,
+        progress_callback: Optional[StatusCallback] = None,
+    ) -> Iterator[None]:
+        semaphore, slot_label, waiting_stage, waiting_progress = self._slot_definition(slot_kind)
+        started_waiting_at = time.monotonic()
+        next_notice_at = started_waiting_at
+        queued_sent = False
+
+        while True:
+            if cancel_event and cancel_event.is_set():
+                raise OperationCancelled()
+
+            if semaphore.acquire(timeout=0.5):
+                break
+
+            waited_seconds = int(time.monotonic() - started_waiting_at)
+            if waited_seconds >= self.config.queue_wait_timeout_seconds:
+                raise ServiceBusyError(
+                    f"当前请求较多，等待{slot_label}处理槽位超时，请稍后重试。",
+                    code=f"{slot_kind}_queue_timeout",
+                )
+
+            if progress_callback and not queued_sent:
+                progress_callback(
+                    "QUEUED",
+                    "当前请求较多，正在排队等待可用处理槽位...",
+                    max(5, waiting_progress - 2),
+                    {"slot_kind": slot_kind, "wait_seconds": waited_seconds},
+                )
+                queued_sent = True
+
+            now = time.monotonic()
+            if progress_callback and now >= next_notice_at:
+                progress_callback(
+                    waiting_stage,
+                    f"正在等待可用{slot_label}槽位... 已等待 {waited_seconds} 秒",
+                    waiting_progress,
+                    {"slot_kind": slot_kind, "wait_seconds": waited_seconds},
+                )
+                next_notice_at = now + 5
+
+        try:
+            yield
+        finally:
+            semaphore.release()
+
+
+@dataclass
 class SpeechRecognitionClient:
     config: AppConfig
+    controller: Optional[UpstreamConcurrencyController] = None
 
-    def transcribe(self, uploaded_audio: UploadedAudio, cancel_event: Optional[object] = None) -> str:
+    def __post_init__(self) -> None:
+        if self.controller is None:
+            self.controller = UpstreamConcurrencyController(self.config)
+
+    def transcribe(
+        self,
+        uploaded_audio: UploadedAudio,
+        cancel_event: Optional[object] = None,
+        progress_callback: Optional[StatusCallback] = None,
+    ) -> str:
         if cancel_event and cancel_event.is_set():
             raise OperationCancelled()
         if not self.config.s2t_api_key:
@@ -59,13 +143,18 @@ class SpeechRecognitionClient:
         payload = {"model": self.config.s2t_model}
 
         try:
-            response = requests.post(
-                self.config.s2t_api_url,
-                files=files,
-                data=payload,
-                headers=headers,
-                timeout=self.config.upstream_timeout_seconds,
-            )
+            with self.controller.reserve(
+                "s2t",
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            ):
+                response = requests.post(
+                    self.config.s2t_api_url,
+                    files=files,
+                    data=payload,
+                    headers=headers,
+                    timeout=self.config.upstream_timeout_seconds,
+                )
         except requests.exceptions.Timeout as exc:
             raise UpstreamTimeoutError("调用 S2T API 超时") from exc
         except requests.exceptions.RequestException as exc:
@@ -90,6 +179,11 @@ class SpeechRecognitionClient:
 @dataclass
 class ChatCompletionClient:
     config: AppConfig
+    controller: Optional[UpstreamConcurrencyController] = None
+
+    def __post_init__(self) -> None:
+        if self.controller is None:
+            self.controller = UpstreamConcurrencyController(self.config)
 
     def ensure_configured(self, model: Optional[str], feature_name: str) -> None:
         missing_parts = self.config.get_missing_opt_parts(model)
@@ -105,6 +199,7 @@ class ChatCompletionClient:
         empty_message: str,
         feature_name: str,
         cancel_event: Optional[object] = None,
+        progress_callback: Optional[StatusCallback] = None,
     ) -> str:
         self.ensure_configured(model, feature_name)
 
@@ -120,12 +215,17 @@ class ChatCompletionClient:
                 raise OperationCancelled()
 
             try:
-                response = requests.post(
-                    self.config.opt_api_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.config.upstream_timeout_seconds,
-                )
+                with self.controller.reserve(
+                    "llm",
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                ):
+                    response = requests.post(
+                        self.config.opt_api_url,
+                        headers=headers,
+                        json=payload,
+                        timeout=self.config.upstream_timeout_seconds,
+                    )
                 if response.status_code == 200:
                     data = response.json()
                     content = (

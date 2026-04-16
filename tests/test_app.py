@@ -5,7 +5,7 @@ import io
 import pytest
 
 from speech_to_text import create_app
-from speech_to_text.clients import ChatCompletionClient
+from speech_to_text.clients import ChatCompletionClient, UpstreamConcurrencyController
 from speech_to_text.config import AppConfig
 from speech_to_text.errors import ConfigurationError
 from speech_to_text.prompts import PROMPT_GENERATE_NOTES
@@ -47,7 +47,7 @@ def client(app):
 def test_transcribe_route_calls_s2t_once_and_returns_success(client, monkeypatch):
     call_count = {"s2t": 0}
 
-    def fake_transcribe(uploaded_audio, services, cancel_event=None):
+    def fake_transcribe(uploaded_audio, services, cancel_event=None, progress_callback=None):
         call_count["s2t"] += 1
         return "原始文本"
 
@@ -73,7 +73,7 @@ def test_transcribe_route_calls_s2t_once_and_returns_success(client, monkeypatch
 
 
 def test_transcribe_stream_emits_expected_events(client, monkeypatch):
-    def fake_transcribe(uploaded_audio, services, cancel_event=None):
+    def fake_transcribe(uploaded_audio, services, cancel_event=None, progress_callback=None):
         return "这是一段足够长的原始文本" * 400
 
     def fake_optimize(raw_text, services, progress_callback=None, cancel_event=None):
@@ -100,6 +100,34 @@ def test_transcribe_stream_emits_expected_events(client, monkeypatch):
     assert '"stage": "OPTIMIZING_CHUNK"' in body
     assert '"stage": "OPTIMIZATION_COMPLETE"' in body
     assert '"stage": "DONE"' in body
+
+
+def test_transcribe_stream_emits_queue_waiting_stage(client, monkeypatch):
+    def fake_transcribe(uploaded_audio, services, cancel_event=None, progress_callback=None):
+        assert progress_callback is not None
+        progress_callback(
+            "WAITING_FOR_S2T_SLOT",
+            "正在等待可用语音识别槽位... 已等待 1 秒",
+            9,
+            {"slot_kind": "s2t", "wait_seconds": 1},
+        )
+        return "原始文本"
+
+    def fake_optimize(raw_text, services, progress_callback=None, cancel_event=None):
+        return "校准后文本", "校准成功！", True
+
+    monkeypatch.setattr("speech_to_text.routes.transcribe_audio", fake_transcribe)
+    monkeypatch.setattr("speech_to_text.routes.perform_text_optimization", fake_optimize)
+
+    response = client.post(
+        "/api/transcribe-stream",
+        data={"audio_file": (io.BytesIO(b"stream-audio"), "test.wav")},
+        content_type="multipart/form-data",
+    )
+
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert '"stage": "WAITING_FOR_S2T_SLOT"' in body
 
 
 def test_upload_limit_returns_413_for_large_payload():
@@ -159,6 +187,40 @@ def test_chat_completion_retries_empty_content(monkeypatch):
     assert responses == []
 
 
+def test_upstream_concurrency_controller_reports_waiting_state():
+    config = AppConfig.from_mapping(
+        {
+            "S2T_MAX_CONCURRENT": "1",
+            "QUEUE_WAIT_TIMEOUT_SECONDS": "2",
+        }
+    )
+    controller = UpstreamConcurrencyController(config)
+    reported_stages = []
+
+    with controller.reserve("s2t"):
+        def report(stage, message, progress, data=None):
+            del message, progress, data
+            reported_stages.append(stage)
+
+        import threading
+        import time
+
+        def wait_for_slot():
+            with controller.reserve("s2t", progress_callback=report):
+                return None
+
+        thread = threading.Thread(
+            target=wait_for_slot,
+            daemon=True,
+        )
+        thread.start()
+        time.sleep(0.7)
+
+    thread.join(timeout=1)
+    assert "QUEUED" in reported_stages
+    assert "WAITING_FOR_S2T_SLOT" in reported_stages
+
+
 def test_long_notes_generation_uses_chunk_map_reduce():
     config = AppConfig.from_mapping(
         {
@@ -189,6 +251,7 @@ def test_long_notes_generation_uses_chunk_map_reduce():
             empty_message,
             feature_name,
             cancel_event=None,
+            progress_callback=None,
         ):
             self.system_prompts.append(messages[0]["content"])
             self.user_inputs.append(messages[1]["content"])
@@ -216,3 +279,12 @@ def test_validate_runtime_rejects_invalid_s2t_url():
     )
     with pytest.raises(ConfigurationError):
         config.validate_runtime()
+
+
+def test_create_app_uses_new_concurrency_defaults():
+    config = AppConfig.from_mapping({})
+    assert config.max_concurrent_workers == 2
+    assert config.waitress_threads == 8
+    assert config.s2t_max_concurrent == 2
+    assert config.llm_max_concurrent == 4
+    assert config.queue_wait_timeout_seconds == 30

@@ -255,100 +255,63 @@ def register_routes(app, services: ServiceContainer) -> None:
             return _sse_error_response(error.message, error.status_code)
 
         cancel_event = threading.Event()
-        progress_queue: queue.Queue[str] = queue.Queue(maxsize=100)
+        progress_queue: queue.Queue[tuple[str, str, int, Optional[dict[str, object]]]] = queue.Queue(
+            maxsize=100
+        )
         heartbeat_queue: queue.Queue[str] = queue.Queue(maxsize=10)
         heartbeat_thread: Optional[HeartbeatThread] = None
-        result_container: dict[str, object] = {}
-        error_container: dict[str, Exception] = {}
         progress_state: dict[str, object] = {}
-        optimization_started_at: Optional[float] = None
+        long_task_started_at: Optional[float] = None
+        heartbeat_stages = {
+            "QUEUED",
+            "WAITING_FOR_S2T_SLOT",
+            "WAITING_FOR_LLM_SLOT",
+            "OPTIMIZATION_START",
+            "OPTIMIZING_CHUNK",
+        }
 
         def progress_callback(
             stage: str,
             message: str,
             progress: int,
-            data: Optional[dict[str, int]] = None,
+            data: Optional[dict[str, object]] = None,
         ) -> None:
             progress_state["stage"] = stage
             progress_state["message"] = message
             progress_state["progress"] = progress
             progress_state["data"] = data or {}
             try:
-                progress_queue.put_nowait(send_progress_event(stage, message, progress, data))
+                progress_queue.put_nowait((stage, message, progress, data))
             except queue.Full:
                 pass
 
-        def optimization_worker(raw_transcription: str) -> None:
+        def pipeline_worker() -> None:
             try:
-                result_container["result"] = perform_text_optimization(
+                progress_callback("S2T_START", "正在进行语音识别...", 10)
+                raw_transcription = transcribe_audio(
+                    uploaded_audio,
+                    services,
+                    cancel_event,
+                    progress_callback,
+                )
+                progress_callback("S2T_COMPLETE", "语音识别完成，获取到原始文本。", 40)
+                progress_callback(
+                    "OPTIMIZATION_START",
+                    "开始文本校准...",
+                    45,
+                    {
+                        "enable_heartbeat": len(raw_transcription)
+                        > services.config.chunk_processing_threshold
+                    },
+                )
+                final_transcription, opt_message, is_calibrated = perform_text_optimization(
                     raw_transcription,
                     services,
                     progress_callback=progress_callback,
                     cancel_event=cancel_event,
                 )
-            except Exception as exc:
-                error_container["error"] = exc
-
-        def generate_progress():
-            nonlocal heartbeat_thread
-            worker: Optional[threading.Thread] = None
-            try:
-                yield send_progress_event("STARTING", "任务启动中...", 5)
-                yield send_progress_event("S2T_START", "正在进行语音识别...", 10)
-                raw_transcription = transcribe_audio(uploaded_audio, services, cancel_event)
-                yield send_progress_event("S2T_COMPLETE", "语音识别完成，获取到原始文本。", 40)
-                yield send_progress_event("OPTIMIZATION_START", "开始文本校准...", 45)
-
-                if len(raw_transcription) > services.config.chunk_processing_threshold:
-                    optimization_started_at = time.time()
-                    heartbeat_thread = HeartbeatThread(heartbeat_queue, interval=15)
-                    heartbeat_thread.start()
-
-                worker = threading.Thread(
-                    target=optimization_worker,
-                    args=(raw_transcription,),
-                    daemon=True,
-                )
-                worker.start()
-
-                while worker.is_alive() or not progress_queue.empty() or not heartbeat_queue.empty():
-                    try:
-                        yield progress_queue.get(timeout=0.5)
-                        continue
-                    except queue.Empty:
-                        pass
-
-                    try:
-                        heartbeat_msg = heartbeat_queue.get_nowait()
-                        yield heartbeat_msg
-                        if progress_state.get("stage") == "OPTIMIZING_CHUNK":
-                            elapsed = (
-                                int(time.time() - optimization_started_at)
-                                if optimization_started_at is not None
-                                else None
-                            )
-                            message = str(progress_state.get("message") or "正在校准文本块...")
-                            if elapsed is not None:
-                                message = f"{message} 已耗时 {elapsed} 秒"
-                            yield send_progress_event(
-                                "OPTIMIZING_CHUNK",
-                                message,
-                                int(progress_state.get("progress") or 70),
-                                progress_state.get("data") if isinstance(progress_state.get("data"), dict) else None,
-                            )
-                    except queue.Empty:
-                        pass
-
-                worker.join()
-
-                if "error" in error_container:
-                    raise error_container["error"]
-                if "result" not in result_container:
-                    raise RuntimeError("文本优化未返回结果")
-
-                final_transcription, opt_message, is_calibrated = result_container["result"]
-                yield send_progress_event("OPTIMIZATION_COMPLETE", "文本校准完成。", 95)
-                yield send_progress_event(
+                progress_callback("OPTIMIZATION_COMPLETE", "文本校准完成。", 95)
+                progress_callback(
                     "DONE",
                     "处理完成！",
                     100,
@@ -361,15 +324,77 @@ def register_routes(app, services: ServiceContainer) -> None:
                         "is_calibrated": is_calibrated,
                     },
                 )
+            except OperationCancelled:
+                return
+            except AppError as error:
+                progress_callback("ERROR", error.message, 100)
+            except Exception as error:
+                progress_callback("ERROR", f"处理请求时发生未知错误: {type(error).__name__}", 100)
+
+        def generate_progress():
+            nonlocal heartbeat_thread
+            nonlocal long_task_started_at
+            worker: Optional[threading.Thread] = None
+            try:
+                yield send_progress_event("STARTING", "任务启动中...", 5)
+                worker = threading.Thread(
+                    target=pipeline_worker,
+                    daemon=True,
+                )
+                worker.start()
+
+                while worker.is_alive() or not progress_queue.empty() or not heartbeat_queue.empty():
+                    try:
+                        stage, message, progress, data = progress_queue.get(timeout=0.5)
+                        if (
+                            heartbeat_thread is None
+                            and (
+                                stage in {"QUEUED", "WAITING_FOR_S2T_SLOT", "WAITING_FOR_LLM_SLOT", "OPTIMIZING_CHUNK"}
+                                or (
+                                    stage == "OPTIMIZATION_START"
+                                    and isinstance(data, dict)
+                                    and bool(data.get("enable_heartbeat"))
+                                )
+                            )
+                        ):
+                            long_task_started_at = time.time()
+                            heartbeat_thread = HeartbeatThread(heartbeat_queue, interval=15)
+                            heartbeat_thread.start()
+
+                        yield send_progress_event(stage, message, progress, data)
+                        if stage in {"OPTIMIZATION_COMPLETE", "DONE", "ERROR"} and heartbeat_thread:
+                            heartbeat_thread.stop()
+                            heartbeat_thread.join(timeout=2)
+                            heartbeat_thread = None
+                        continue
+                    except queue.Empty:
+                        pass
+
+                    try:
+                        heartbeat_msg = heartbeat_queue.get_nowait()
+                        yield heartbeat_msg
+                        if progress_state.get("stage") in heartbeat_stages:
+                            elapsed = (
+                                int(time.time() - long_task_started_at)
+                                if long_task_started_at is not None
+                                else None
+                            )
+                            message = str(progress_state.get("message") or "正在处理...")
+                            if elapsed is not None:
+                                message = f"{message} 已耗时 {elapsed} 秒"
+                            yield send_progress_event(
+                                str(progress_state.get("stage") or "OPTIMIZING_CHUNK"),
+                                message,
+                                int(progress_state.get("progress") or 70),
+                                progress_state.get("data") if isinstance(progress_state.get("data"), dict) else None,
+                            )
+                    except queue.Empty:
+                        pass
+
+                worker.join()
             except GeneratorExit:
                 cancel_event.set()
                 raise
-            except OperationCancelled:
-                cancel_event.set()
-            except AppError as error:
-                yield send_progress_event("ERROR", error.message, 100)
-            except Exception as error:
-                yield send_progress_event("ERROR", f"处理请求时发生未知错误: {type(error).__name__}", 100)
             finally:
                 cancel_event.set()
                 if heartbeat_thread:
