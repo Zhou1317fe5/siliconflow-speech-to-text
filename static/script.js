@@ -75,6 +75,10 @@ document.addEventListener('DOMContentLoaded', function() {
         return tasks.some((task) => ['pending', 'error', 'cancelled'].includes(task.status));
     }
 
+    function fileIdentity(file) {
+        return [file.name, file.size, file.lastModified].join('::');
+    }
+
     function resetGeneratedViews(task) {
         task.summaryText = null;
         task.isShowingSummary = false;
@@ -289,7 +293,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const hasContent = Boolean(task && task.transcription && task.transcription.trim() !== '');
         const selectedTaskBusy = Boolean(task && ['uploading', 'queued', 'processing'].includes(task.status));
 
-        submitBtn.disabled = isBatchRunning || !hasRunnableTasks();
+        submitBtn.disabled = !hasRunnableTasks();
         recalibrateBtn.disabled = !hasContent || selectedTaskBusy;
         summarizeBtn.disabled = !hasContent || selectedTaskBusy;
         generateNotesBtn.disabled = !hasContent || selectedTaskBusy;
@@ -385,15 +389,15 @@ document.addEventListener('DOMContentLoaded', function() {
 
     function updateFileNameDisplay(files) {
         if (!files.length) {
-            fileNameDisplay.textContent = '未选择文件';
+            fileNameDisplay.textContent = '未选择文件，可重复点击追加';
             return;
         }
         const preview = files.slice(0, 3).map((file) => file.name).join('、');
         if (files.length <= 3) {
-            fileNameDisplay.textContent = `已选择 ${files.length} 个文件：${preview}`;
+            fileNameDisplay.textContent = `已加入 ${files.length} 个文件：${preview}`;
             return;
         }
-        fileNameDisplay.textContent = `已选择 ${files.length} 个文件：${preview} 等`;
+        fileNameDisplay.textContent = `已加入 ${files.length} 个文件：${preview} 等`;
     }
 
     function parseSSEChunk(buffer, onEvent) {
@@ -599,20 +603,48 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
-    function replaceTasks(files) {
-        abortAllActiveRequests(true);
-        tasks = files.map((file) => createTask(file));
-        selectedTaskId = tasks.length ? tasks[0].id : null;
-        updateFileNameDisplay(files);
+    function appendTasks(files) {
+        if (!files.length) {
+            updateFileNameDisplay(tasks.map((task) => task.file));
+            return;
+        }
+
+        const knownFiles = new Set(tasks.map((task) => fileIdentity(task.file)));
+        const newTasks = [];
+        files.forEach((file) => {
+            const identity = fileIdentity(file);
+            if (knownFiles.has(identity)) {
+                return;
+            }
+            knownFiles.add(identity);
+            newTasks.push(createTask(file));
+        });
+
+        if (!newTasks.length) {
+            updateStatus('所选文件已在任务列表中。', 'info');
+            audioFileInput.value = '';
+            return;
+        }
+
+        tasks = tasks.concat(newTasks);
+        if (!selectedTaskId) {
+            selectedTaskId = newTasks[0].id;
+        }
+        updateFileNameDisplay(tasks.map((task) => task.file));
         renderTaskList();
         updateOverallProgress();
         updateResultPanel();
         setActionButtonsDisabledState();
+        audioFileInput.value = '';
+
+        if (hasActiveTasks()) {
+            startBatchTranscription();
+        }
     }
 
     audioFileInput.addEventListener('change', function(event) {
         const files = Array.from(event.target.files || []);
-        replaceTasks(files);
+        appendTasks(files);
     });
 
     submitBtn.addEventListener('click', function(event) {
